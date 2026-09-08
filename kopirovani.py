@@ -221,6 +221,7 @@ def get_lists(sp):
     return results
 
 def get_fields(sp, list_title):
+    """Sloupce pro TVORBU schematu (bez base-type poli jako Title)."""
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
                "?$select=Id,Title,InternalName,TypeAsString,ReadOnlyField,Hidden,FromBaseType")
     r.raise_for_status()
@@ -229,6 +230,30 @@ def get_fields(sp, list_title):
             if not f["ReadOnlyField"] and not f["Hidden"]
             and f["InternalName"] not in ("ContentType", "Attachments")
             and not f["FromBaseType"]]
+
+
+# systemova/technicka pole, ktera se pri kopirovani DAT nikdy neprepisuji
+_DATA_SYSTEM_FIELDS = {
+    "ContentType", "Attachments", "Author", "Editor", "Created", "Modified",
+    "ID", "GUID", "FileLeafRef", "FileRef", "FileDirRef", "Order", "owshiddenversion",
+    "_UIVersionString", "_ModerationStatus", "_Level", "AppAuthor", "AppEditor",
+    "ComplianceAssetId", "_ComplianceFlags", "_ComplianceTag",
+}
+
+def get_data_fields(sp, list_title):
+    """Sloupce pro KOPIROVANI DAT - VCETNE base-type poli (napr. Title!),
+    ale bez read-only a systemovych technicky poli."""
+    r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+               "?$select=Title,InternalName,TypeAsString,ReadOnlyField,Hidden")
+    r.raise_for_status()
+    out = []
+    for f in r.json()["d"]["results"]:
+        if f["ReadOnlyField"] or f["Hidden"]:
+            continue
+        if f["InternalName"] in _DATA_SYSTEM_FIELDS:
+            continue
+        out.append(f)
+    return out
 
 
 # ============================ VYTVORENI CHYBEJICICH SEZNAMU ================
@@ -347,18 +372,29 @@ def copy_list_fields(src, tgt, list_title):
 
 # ============================ PREVZETI VIEWS (ZOBRAZENI) ====================
 
+def _get_view_fields(sp, list_title, vtitle):
+    """Natahne SEZNAM sloupcu (internal names) zobrazenych ve view.
+    ViewFields NELZE ziskat pres $select - je nutny dedikovany endpoint."""
+    r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+               f"/getbytitle('{odata(vtitle)}')/viewfields")
+    if r.status_code != 200:
+        return []
+    d = r.json()["d"]
+    # struktura: d.Items.results = ["Title","Ano_x002f_ne",...]
+    return d.get("Items", {}).get("results", []) or []
+
+
 def copy_views(src, tgt, list_title):
-    """Prevezme zobrazeni (views) seznamu ze zdroje - vytvori chybejici na cili."""
+    """Prevezme zobrazeni (views) seznamu ze zdroje vc. zobrazenych sloupcu (ViewFields)."""
     if not COPY_VIEWS:
         return
     r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
-                "?$select=Title,ViewQuery,RowLimit,DefaultView,Paged,Hidden,ViewFields,PersonalView")
+                "?$select=Title,ViewQuery,RowLimit,DefaultView,Paged,Hidden,PersonalView")
     if r.status_code != 200:
         return
     src_views = [v for v in r.json()["d"]["results"] if not v.get("Hidden") and not v.get("PersonalView")]
     if not src_views:
         return
-    # existujici views na cili
     rt = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views?$select=Title")
     existing = set()
     if rt.status_code == 200:
@@ -366,12 +402,19 @@ def copy_views(src, tgt, list_title):
     log(f"  Prevzeti views ({len(src_views)}):")
     for v in src_views:
         vtitle = v["Title"]
+        # zdrojove zobrazene sloupce (natazene zvlast)
+        src_vf = _get_view_fields(src, list_title, vtitle)
+
         if vtitle in existing:
-            log(f"    [VIEW] '{vtitle}' - uz existuje, aktualizuji dotaz")
+            log(f"    [VIEW] '{vtitle}' - aktualizuji dotaz + sloupce ({len(src_vf)})")
             if not DRY_RUN:
                 _update_view(tgt, list_title, vtitle, v)
+                if src_vf:
+                    _set_view_fields(tgt, list_title, vtitle, src_vf)
             continue
-        log(f"    [VIEW] vytvarim '{vtitle}'" + (" (vychozi)" if v.get("DefaultView") else ""))
+
+        log(f"    [VIEW] vytvarim '{vtitle}'" + (" (vychozi)" if v.get("DefaultView") else "")
+            + f" - sloupce: {len(src_vf)}")
         if DRY_RUN:
             continue
         body = {"__metadata": {"type": "SP.View"},
@@ -386,10 +429,8 @@ def copy_views(src, tgt, list_title):
         if resp.status_code not in (200, 201):
             log(f"        !!! chyba vytvareni view: {resp.status_code} {resp.text[:200]}")
             continue
-        # nastav ViewFields (sloupce ve view)
-        vf = (v.get("ViewFields") or {}).get("Items", {}).get("results", [])
-        if vf:
-            _set_view_fields(tgt, list_title, vtitle, vf)
+        if src_vf:
+            _set_view_fields(tgt, list_title, vtitle, src_vf)
 
 def _update_view(tgt, list_title, vtitle, v):
     body = {"__metadata": {"type": "SP.View"},
@@ -401,22 +442,33 @@ def _update_view(tgt, list_title, vtitle, v):
              data=json.dumps(body))
 
 def _set_view_fields(tgt, list_title, vtitle, fields):
+    """Nastavi zobrazene sloupce view: nejdriv smaze vse, pak prida ze zdroje."""
     base = (f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
             f"/getbytitle('{odata(vtitle)}')/viewfields")
     tgt.post(base + "/removeallviewfields", extra_headers=tgt.write_headers())
     for fn in fields:
-        tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
+        r = tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
+        if r.status_code not in (200, 204):
+            log(f"        (!) sloupec '{fn}' nelze pridat do view: {r.status_code}")
 
 
 # ============================ NAVIGACE (Quick Launch + horni menu) ==========
 
 def _remap_url(u):
-    """Premapuje server-relative URL ze zdroje na cil (jinak necha externi)."""
+    """Premapuje server-relative i absolutni URL ze zdroje na cil."""
     if not u:
         return u
-    sp = SOURCE_SITE.split(".com", 1)[1]
-    tp = TARGET_SITE.split(".com", 1)[1]
-    return u.replace(sp, tp)
+    sp = SOURCE_SITE.split(".com", 1)[1]     # /sites/Test_A
+    tp = TARGET_SITE.split(".com", 1)[1]     # /sites/Project02
+    return u.replace(SOURCE_SITE, TARGET_SITE).replace(sp, tp)
+
+
+def _is_system_nav_url(u):
+    """Systemove odkazy (Site contents, Recent, ...) - cil je ma vlastni, nekopirovat."""
+    if not u:
+        return False
+    low = u.lower()
+    return "/_layouts/" in low or "viewlsts.aspx" in low
 
 def _get_nav_nodes(sp, which):
     """which = 'quicklaunch' | 'topnavigationbar'. Vrati stromovou strukturu."""
@@ -440,22 +492,28 @@ def _clear_nav(tgt, which):
                  extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
 
 def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
+    # systemove odkazy (_layouts, Site contents) preskoc - cil je ma vlastni
+    if _is_system_nav_url(url):
+        log(f"        (i) preskakuji systemovy nav uzel '{title}' ({url})")
+        return None
     if parent_id is not None:
         endpoint = f"/_api/web/navigation/getnodebyid({parent_id})/children"
     else:
         endpoint = f"/_api/web/navigation/{which}"
+    remapped = _remap_url(url)
+    # pokud odkaz stale miri na zdrojovy web, oznac jako externi (aby SP neveril, ze je lokalni)
+    still_external = bool(is_external) or ("/sites/" in (url or "") and SOURCE_SITE.split(".com",1)[1] in (url or "") and remapped == url)
     body = {"__metadata": {"type": "SP.NavigationNode"},
-            "Title": title, "Url": _remap_url(url) if not is_external else url,
-            "IsExternal": bool(is_external)}
-    r = tgt.post(endpoint,
-                 extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
-                 data=json.dumps(body))
-    if r.status_code in (200, 201):
-        try:
+            "Title": title, "Url": remapped, "IsExternal": still_external}
+    try:
+        r = tgt.post(endpoint,
+                     extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                     data=json.dumps(body))
+        if r.status_code in (200, 201):
             return r.json()["d"]["Id"]
-        except Exception:
-            return None
-    log(f"        !!! chyba pridani nav uzlu '{title}': {r.status_code} {r.text[:150]}")
+        log(f"        !!! nav uzel '{title}' preskocen: {r.status_code} {r.text[:120]}")
+    except Exception as e:
+        log(f"        !!! nav uzel '{title}' vyjimka: {e}")
     return None
 
 def copy_navigation(src, tgt):
@@ -679,7 +737,12 @@ def copy_asset_library(src, tgt, path_suffix):
 # ============================ MODERNI STRANKY =====
 
 PAGE_FIELDS_TO_COPY = ["Title", "CanvasContent1", "LayoutWebpartsContent",
-                       "Description", "PromotedState", "PageLayoutType"]
+                       "Description", "PromotedState", "PageLayoutType",
+                       "ClientSideApplicationId", "_TopicHeader", "_SPSitePageFlags"]
+
+# GUID aplikace, ktera oznacuje stranku jako MODERNI (client-side). Bez nej
+# SharePoint stranku povazuje za klasickou a renderuje ji rozbite.
+MODERN_PAGE_APP_ID = "b6917cb1-93a0-4b97-a84d-7cf49975d4ec"
 
 def copy_site_pages_library(src, tgt, lst):
     title = lst["Title"]
@@ -719,7 +782,17 @@ def copy_site_pages_library(src, tgt, lst):
         values = {"__metadata": {"type": entity_type}}
         for field in PAGE_FIELDS_TO_COPY:
             if item.get(field) is not None:
-                values[field] = item[field]
+                val = item[field]
+                # v obsahu stranky (canvas/layout) premapuj odkazy /sites/Test_A -> /sites/Project02
+                if field in ("CanvasContent1", "LayoutWebpartsContent") and isinstance(val, str):
+                    val = _remap_url(val)
+                values[field] = val
+        # KLICOVE: stranka musi byt oznacena jako MODERNI (client-side), jinak se
+        # renderuje rozbite. Nastav natvrdo, i kdyz zdroj vratil null.
+        values["ClientSideApplicationId"] = MODERN_PAGE_APP_ID
+        if not values.get("PageLayoutType"):
+            # Home.aspx -> "Home", ostatni -> "Article"
+            values["PageLayoutType"] = "Home" if name.lower() == "home.aspx" else "Article"
         banner = item.get("BannerImageUrl")
         if isinstance(banner, dict) and banner.get("Url"):
             values["BannerImageUrl"] = {"__metadata": {"type": "SP.FieldUrlValue"},
@@ -769,7 +842,11 @@ def set_welcome_page(src, tgt):
                     extra_headers=tgt.write_headers(method_override="MERGE",
                                                     extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
                     data=json.dumps({"__metadata": {"type": "SP.Folder"}, "WelcomePage": welcome}))
-    if resp.status_code not in (200, 204):
+    if resp.status_code in (401, 403):
+        log(f"    (i) WelcomePage nelze nastavit pres REST (chybi opravneni ManageWeb).")
+        log(f"        -> Nastav rucne: Nastaveni webu > vyber '{welcome}' jako domovskou stranku,")
+        log(f"           nebo v knihovne Site Pages u stranky '...->Make homepage'.")
+    elif resp.status_code not in (200, 204):
         log(f"    !!! chyba WelcomePage: {resp.status_code} {resp.text[:250]}")
 
 
@@ -779,7 +856,7 @@ SKIP_FIELD_TYPES = {"User", "UserMulti", "Lookup", "LookupMulti",
                     "TaxonomyFieldType", "TaxonomyFieldTypeMulti"}
 
 def copy_generic_list_items(src, tgt, list_title):
-    fields = get_fields(src, list_title)
+    fields = get_data_fields(src, list_title)   # VCETNE Title a dalsich base-type poli
     skipped = [f["Title"] for f in fields if f["TypeAsString"] in SKIP_FIELD_TYPES]
     if skipped:
         log(f"    (!) Preskakuji nepodporovane sloupce: {skipped}")
@@ -787,7 +864,7 @@ def copy_generic_list_items(src, tgt, list_title):
     r.raise_for_status()
     items = r.json()["d"]["results"]
     log(f"    Nalezeno {len(items)} polozek ke kopirovani")
-    entity_type = get_entity_type_full_name(src, list_title)
+    entity_type = get_entity_type_full_name(tgt, list_title)   # entity type CILE (kam zapisujeme)
     for item in items:
         values = {"__metadata": {"type": entity_type}}
         for field in fields:
