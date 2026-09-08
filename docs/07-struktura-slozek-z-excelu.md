@@ -47,6 +47,32 @@ seznamu, takže se na ní dají držet hodnoty sloupců stejně jako na dokument
 Jiné mapování jde předat přes `-MetadataMap`, metadata se dají vypnout přes
 `-SkipMetadata`.
 
+### Konstantní hodnota na každou složku
+
+Hodnota, která je pro celý běh stejná a v tabulce není, se předá přes
+`-FixedMetadata`. Typicky klasifikace celé sady dokumentů:
+
+```powershell
+-FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" }
+```
+
+Zapíše se na **každou** vytvořenou složku ve všech úrovních. Klíč je interní
+název sloupce, hodnota text. Sloupců se dá předat víc:
+
+```powershell
+-FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs"; ProjectId = "EOZ-2026-014" }
+```
+
+Sloupec, který v knihovně chybí, se vytvoří jako Text a přidá do výchozího
+zobrazení — stejně jako sloupce z `-MetadataMap`. Když stejný sloupec plní
+i tabulka, vyhrává hodnota z tabulky, protože je konkrétnější.
+
+> Pokud je `CSD` v knihovně už založený jako **Choice**, musí `5.3 Car Series and
+> Concept Docs` být jednou z jeho možností, jinak SharePoint zápis odmítne
+> (nebo hodnotu zahodí, podle nastavení „Allow fill-in choices"). Pro sloupec
+> typu **Managed Metadata** takhle text zapsat nelze — tam by bylo potřeba
+> předat GUID termínu.
+
 > Všechny tři sloupce jsou zatím typu Text. Pokud se `Responsible` (A1–A5) má
 > vybírat ze seznamu hodnot, patří tam typ Choice, a pokud jde o útvary nebo
 > osoby, patří to do Term Store, respektive na typ Person. To je otevřená otázka
@@ -82,6 +108,12 @@ Stejný příkaz s `-Apply` na konci:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -Apply
+```
+
+S konstantním sloupcem `CSD`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" } -Apply
 ```
 
 ## Když nemáte modul ImportExcel
@@ -120,7 +152,8 @@ je prázdná, se přeskočí s varováním. Stejně tak název s nepovolenými z
 | `V tabulce nejsou sloupce Level1, Level2, ...` | Jiná hlavička | Skript vypíše nalezené sloupce; přejmenovat na `Level1`, `Level2`, … |
 | `Chybí ClientId` | Nezadané ClientId | Viz [06-jak-spustit-export.md](06-jak-spustit-export.md) |
 | `'<název>' není knihovna dokumentů` (varování) | Cíl je seznam, ne knihovna | Zkontrolovat `-Library`, běh přesto pokračuje |
-| `Metadata pro '<cesta>' nelze zapsat` | Sloupec neexistuje nebo má nekompatibilní typ | Zkontrolovat `-MetadataMap` a typy sloupců v knihovně |
+| `Metadata pro '<cesta>' nelze zapsat` | Sloupec neexistuje nebo má nekompatibilní typ | Zkontrolovat `-MetadataMap`, `-FixedMetadata` a typy sloupců v knihovně |
+| Hodnota z `-FixedMetadata` se nezapsala | Sloupec je Choice bez té možnosti, nebo Managed Metadata | Přidat hodnotu mezi možnosti sloupce, u Managed Metadata předat GUID termínu |
 
 ## Kam to vede dál
 
