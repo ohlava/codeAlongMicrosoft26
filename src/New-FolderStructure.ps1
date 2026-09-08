@@ -521,32 +521,46 @@ function Enable-FieldReadOnly($List, $FieldNames) {
 }
 
 function Show-LibraryFields($List, $OutFolder) {
-    $fields = Get-PnPField -List $List.Id |
-        Where-Object { -not $_.FromBaseType -or -not $_.Hidden } |
-        Select-Object Title, InternalName, StaticName, TypeAsString, ReadOnlyField, Sealed, Hidden, Required, Group |
+    $all = Get-PnPField -List $List.Id |
+        Select-Object Title, InternalName, StaticName, TypeAsString, ReadOnlyField, Sealed,
+                      Hidden, Required, FromBaseType, Group |
         Sort-Object Title, InternalName
 
-    $fields | Format-Table Title, InternalName, TypeAsString, ReadOnlyField, Sealed, Hidden -AutoSize |
+    # Vestavěné sloupce (Author, Created, ID, ...) a interní sloupce s podtržítkem
+    # jsou read-only vždycky a nikoho nezajímají. Zajímavé jsou ty, které do
+    # knihovny přidal někdo nebo nějaké řešení - do těch se dá chtít zapisovat.
+    $custom = @($all | Where-Object {
+        -not $_.FromBaseType -and -not $_.InternalName.StartsWith("_")
+    })
+
+    Write-Host "  Sloupce přidané do knihovny ($($custom.Count) z $($all.Count) celkem):"
+    Write-Host ""
+    $custom | Format-Table Title, InternalName, TypeAsString, ReadOnlyField, Sealed, Hidden, Group -AutoSize |
         Out-String -Width 220 | Write-Host
 
-    $blocked = @($fields | Where-Object { $_.ReadOnlyField -or $_.Sealed })
+    $writable = @($custom | Where-Object { -not $_.ReadOnlyField -and -not $_.Sealed -and -not $_.Hidden })
+    Write-Host "  Zapisovatelné: $(($writable.InternalName | Sort-Object) -join ', ')"
+    Write-Host ""
+
+    $blocked = @($custom | Where-Object { $_.ReadOnlyField -or $_.Sealed })
     foreach ($field in $blocked) {
         $why = @()
         if ($field.ReadOnlyField) { $why += "ReadOnly" }
         if ($field.Sealed) { $why += "Sealed" }
-        Write-Host "  POZOR: do '$($field.Title)' ($($field.InternalName)) nelze zapisovat: $($why -join ', ')" -ForegroundColor Yellow
+        Write-Host "  ZAMČENO: '$($field.Title)' ($($field.InternalName)), typ $($field.TypeAsString): $($why -join ', ')" -ForegroundColor Yellow
     }
 
-    $duplicates = $fields | Group-Object Title | Where-Object { $_.Count -gt 1 }
+    # Duplicitní displejové názvy - kvůli nim nelze sloupec určit podle názvu.
+    $duplicates = $all | Group-Object Title | Where-Object { $_.Count -gt 1 }
     foreach ($group in $duplicates) {
         $names = ($group.Group | ForEach-Object { "$($_.InternalName) ($($_.TypeAsString))" }) -join ", "
-        Write-Host "  POZOR: název '$($group.Name)' má $($group.Count) sloupců: $names" -ForegroundColor Yellow
+        Write-Host "  DUPLICITA: název '$($group.Name)' má $($group.Count) sloupců: $names" -ForegroundColor Red
     }
 
     $target = "$OutFolder/library-fields.csv"
-    $fields | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
+    $all | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
     Write-Host ""
-    Write-Host "  Úplný seznam v $target"
+    Write-Host "  Úplný seznam včetně vestavěných sloupců v $target"
 }
 
 Assert-Prerequisites

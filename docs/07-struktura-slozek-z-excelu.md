@@ -114,6 +114,37 @@ WARNING: Název 'CSD Class' odpovídá 3 sloupcům:
 -FixedMetadata @{ "CSD_x0020_Class" = "5.3 Car Series and Concept Docs" }
 ```
 
+Interní název určuje sloupec jednoznačně, takže duplicitní displejové názvy
+přestanou vadit — ale je pořád lepší je uklidit, jinak uživatel v knihovně vidí
+tři stejně pojmenované sloupce a neví, do kterého psát.
+
+### Odkud se duplicity berou
+
+Starší verze skriptu hledala existující sloupec **jen podle interního názvu**.
+Ten ale nikdy neobsahuje mezeru: `Add-PnPField -InternalName "CSD Class"`
+založí sloupec s interním názvem `CSD_x0020_Class`. Při dalším běhu skript
+hledal `CSD Class`, nenašel ho a založil další — SharePoint mu přidal číslo:
+`CSD_x0020_Class0`, `CSD_x0020_Class1`. Tři běhy tedy udělaly tři sloupce.
+
+Aktuální verze hledá i podle displejového názvu a při nejednoznačnosti **nic
+nezakládá**. Duplicity, které už vznikly, ale sama neuklidí — mazání zůstává
+na člověku.
+
+Před smazáním se vyplatí zjistit, kde jsou data:
+
+```powershell
+Get-PnPListItem -List "<knihovna>" -Fields "FileLeafRef","CSD_x0020_Class","CSD_x0020_Class0","CSD_x0020_Class1" |
+    ForEach-Object { $_.FieldValues } |
+    Select-Object FileLeafRef, CSD_x0020_Class, CSD_x0020_Class0, CSD_x0020_Class1
+```
+
+a přebytečné pak odstranit:
+
+```powershell
+Remove-PnPField -List "<knihovna>" -Identity "CSD_x0020_Class0" -Force
+Remove-PnPField -List "<knihovna>" -Identity "CSD_x0020_Class1" -Force
+```
+
 Co v knihovně skutečně je, ukáže diagnostický režim:
 
 ```powershell
