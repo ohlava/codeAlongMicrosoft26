@@ -321,25 +321,72 @@ function Get-TargetColumns($MetaMap, $Fixed) {
     return @($targets.Values)
 }
 
+# Mapa pro překlad na interní názvy sloupců. Set-PnPListItem přijímá interní
+# název, ale uživatel zadává ten, který vidí v SharePointu - a ten se u sloupce
+# s mezerou liší ("CSD Class" -> "CSD_x0020_Class"). PowerShellové hashtable
+# porovnávají klíče bez ohledu na velikost písmen, takže stačí jedna mapa.
+function Get-FieldNameMap($List) {
+    $map = @{}
+    foreach ($field in (Get-PnPField -List $List.Id)) {
+        foreach ($alias in @($field.InternalName, $field.StaticName, $field.Title)) {
+            if ($alias -and -not $map.ContainsKey($alias)) {
+                $map[$alias] = $field.InternalName
+            }
+        }
+    }
+    return $map
+}
+
+# Interní název pro nově zakládaný sloupec. Mezery a diakritika by se zakódovaly
+# do nečitelného _x0020_, takže je rovnou vynecháme a hezký název dáme do titulku.
+function Get-SafeInternalName($Name) {
+    $clean = ($Name -replace '[^A-Za-z0-9_]', '')
+    if (-not $clean) { throw "Z názvu sloupce '$Name' nelze odvodit interní název." }
+    if ($clean -match '^\d') { $clean = "f$clean" }
+    return $clean
+}
+
+function Convert-MetadataKeys($Metadata, $FieldMap, $FolderPath) {
+    $converted = @{}
+    foreach ($key in $Metadata.Keys) {
+        if ($FieldMap.ContainsKey($key)) {
+            $converted[$FieldMap[$key]] = $Metadata[$key]
+        }
+        else {
+            Add-StructureWarning "Sloupec '$key' v knihovně neexistuje, u '$FolderPath' ho přeskakuji."
+        }
+    }
+    return $converted
+}
+
 function Set-MetadataColumns($List, $TargetColumns) {
-    $existing = @(Get-PnPField -List $List.Id | Select-Object -ExpandProperty InternalName)
+    $fieldMap = Get-FieldNameMap $List
 
     foreach ($target in $TargetColumns) {
-        if ($existing -contains $target.InternalName) {
-            Write-Host "  = $($target.InternalName) už existuje"
+        # Existující sloupec hledáme podle interního i displejového názvu.
+        $resolved = $null
+        foreach ($alias in @($target.InternalName, $target.DisplayName)) {
+            if ($alias -and $fieldMap.ContainsKey($alias)) { $resolved = $fieldMap[$alias]; break }
+        }
+
+        if ($resolved) {
+            $note = if ($resolved -ne $target.InternalName) { " (interně $resolved)" } else { "" }
+            Write-Host "  = $($target.InternalName)$note už existuje"
             continue
         }
+
+        $internalName = Get-SafeInternalName $target.InternalName
 
         if ($Apply) {
             Add-PnPField -List $List.Id `
                 -DisplayName $target.DisplayName `
-                -InternalName $target.InternalName `
+                -InternalName $internalName `
                 -Type Text `
                 -AddToDefaultView | Out-Null
-            Write-Host "  + $($target.InternalName) vytvořen" -ForegroundColor Green
+            Write-Host "  + $($target.DisplayName) vytvořen (interně $internalName, Text)" -ForegroundColor Green
         }
         else {
-            Write-Host "  + [dry-run] vytvořil bych $($target.InternalName) ($($target.DisplayName), Text)" -ForegroundColor Yellow
+            Write-Host "  + [dry-run] vytvořil bych '$($target.DisplayName)' (interně $internalName, Text)" -ForegroundColor Yellow
         }
     }
 }
@@ -392,6 +439,11 @@ Write-Step "Zjišťuji, co už v knihovně je"
 $existing = Get-ExistingFolderMap $list $libraryRoot
 Write-Host "  existujících složek: $($existing.Count)"
 
+if (-not $SkipMetadata) {
+    Write-Step "Sloupce pro metadata"
+    Set-MetadataColumns $list (Get-TargetColumns $MetadataMap $FixedMetadata)
+}
+
 $plan = foreach ($folder in $desired) {
     [pscustomobject]@{
         Path      = $folder.Path
@@ -436,11 +488,6 @@ if (-not $Apply) {
     return
 }
 
-if (-not $SkipMetadata) {
-    Write-Step "Zajišťuji sloupce pro metadata"
-    Set-MetadataColumns $list (Get-TargetColumns $MetadataMap $FixedMetadata)
-}
-
 Write-Step "Vytvářím složky"
 $created = 0
 foreach ($folder in ($desired | Where-Object { -not $existing.ContainsKey($_.Path) })) {
@@ -462,8 +509,10 @@ Write-Host "  vytvořeno: $created"
 if (-not $SkipMetadata) {
     Write-Step "Zapisuji metadata"
 
-    # Znovu načíst - potřebujeme item ID právě vytvořených složek.
+    # Znovu načíst - potřebujeme item ID právě vytvořených složek a interní
+    # názvy právě založených sloupců.
     $existing = Get-ExistingFolderMap $list $libraryRoot
+    $fieldMap = Get-FieldNameMap $list
 
     $updated = 0
     foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
@@ -472,10 +521,13 @@ if (-not $SkipMetadata) {
             continue
         }
 
+        $values = Convert-MetadataKeys $folder.Metadata $fieldMap $folder.Path
+        if ($values.Count -eq 0) { continue }
+
         try {
             Set-PnPListItem -List $list.Id `
                 -Identity $existing[$folder.Path] `
-                -Values $folder.Metadata `
+                -Values $values `
                 -ErrorAction Stop | Out-Null
             $updated++
         }

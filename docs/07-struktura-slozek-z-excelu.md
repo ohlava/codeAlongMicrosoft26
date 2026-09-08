@@ -53,19 +53,45 @@ Hodnota, která je pro celý běh stejná a v tabulce není, se předá přes
 `-FixedMetadata`. Typicky klasifikace celé sady dokumentů:
 
 ```powershell
--FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" }
+-FixedMetadata @{ "CSD Class" = "5.3 Car Series and Concept Docs" }
 ```
+
+**Název sloupce s mezerou musí být v uvozovkách.** Bez nich PowerShell hlásí
+chybu, protože `CSD` a `Class` bere jako dvě věci před `=`.
 
 Zapíše se na **každou** vytvořenou složku ve všech úrovních. Klíč je interní
 název sloupce, hodnota text. Sloupců se dá předat víc:
 
 ```powershell
--FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs"; ProjectId = "EOZ-2026-014" }
+-FixedMetadata @{ "CSD Class" = "5.3 Car Series and Concept Docs"; ProjectId = "EOZ-2026-014" }
 ```
 
 Sloupec, který v knihovně chybí, se vytvoří jako Text a přidá do výchozího
 zobrazení — stejně jako sloupce z `-MetadataMap`. Když stejný sloupec plní
 i tabulka, vyhrává hodnota z tabulky, protože je konkrétnější.
+
+### Displejový a interní název
+
+Sloupec má v SharePointu dva názvy: ten, který je vidět (`CSD Class`), a interní,
+kterým se k němu přistupuje z API. U sloupce s mezerou v názvu se liší —
+interní bývá `CSD_x0020_Class`.
+
+**Skript si to přeloží sám**, takže se zadává ten název, který je vidět
+v knihovně. Funguje i interní, kdyby ho někdo znal. Krok „Sloupce pro metadata"
+vypíše, co našel:
+
+```
+  = Responsible už existuje
+  = CSD Class (interně CSD_x0020_Class) už existuje
+  + [dry-run] vytvořil bych 'Name (English)' (interně NameEnglish, Text)
+```
+
+Nově zakládané sloupce dostanou interní název bez mezer a diakritiky
+(`CSD Class` -> `CSDClass`), aby v API nekončily jako nečitelné `_x0020_`.
+Displejový název zůstane tak, jak byl zadaný.
+
+Sloupec, který se nepodaří najít ani založit, se u zápisu metadat přeskočí
+s varováním — zbytek metadat se zapíše.
 
 > Pokud je `CSD` v knihovně už založený jako **Choice**, musí `5.3 Car Series and
 > Concept Docs` být jednou z jeho možností, jinak SharePoint zápis odmítne
@@ -110,10 +136,10 @@ Stejný příkaz s `-Apply` na konci:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -Apply
 ```
 
-S konstantním sloupcem `CSD`:
+S konstantním sloupcem `CSD Class`:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" } -Apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -FixedMetadata @{ "CSD Class" = "5.3 Car Series and Concept Docs" } -Apply
 ```
 
 ## Když nemáte modul ImportExcel
@@ -154,6 +180,8 @@ je prázdná, se přeskočí s varováním. Stejně tak název s nepovolenými z
 | `'<název>' není knihovna dokumentů` (varování) | Cíl je seznam, ne knihovna | Zkontrolovat `-Library`, běh přesto pokračuje |
 | `Metadata pro '<cesta>' nelze zapsat` | Sloupec neexistuje nebo má nekompatibilní typ | Zkontrolovat `-MetadataMap`, `-FixedMetadata` a typy sloupců v knihovně |
 | Hodnota z `-FixedMetadata` se nezapsala | Sloupec je Choice bez té možnosti, nebo Managed Metadata | Přidat hodnotu mezi možnosti sloupce, u Managed Metadata předat GUID termínu |
+| `A positional parameter cannot be found` u `-FixedMetadata` | Název sloupce s mezerou není v uvozovkách | `@{ "CSD Class" = "..." }` |
+| `Sloupec '<název>' v knihovně neexistuje, přeskakuji ho` | Název nesouhlasí s displejovým ani interním | Zkontrolovat podle výpisu v kroku „Sloupce pro metadata" |
 
 ## Kam to vede dál
 
