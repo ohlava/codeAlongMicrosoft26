@@ -93,6 +93,58 @@ Displejový název zůstane tak, jak byl zadaný.
 Sloupec, který se nepodaří najít ani založit, se u zápisu metadat přeskočí
 s varováním — zbytek metadat se zapíše.
 
+### Když je v knihovně víc sloupců se stejným názvem
+
+Knihovna může obsahovat několik sloupců, které se **jmenují stejně**, ale mají
+různý interní název a typ — typicky když jeden pochází z content typu, druhý
+založil někdo ručně a třetí přišel se šablonou.
+
+Displejový název pak neurčuje sloupec jednoznačně. Skript v takovém případě
+**nic nezapíše a nic nezaloží**, jen vypíše kandidáty:
+
+```
+WARNING: Název 'CSD Class' odpovídá 3 sloupcům:
+         RevIMBCS (TaxonomyFieldType), CSD_x0020_Class (Text), CSDClass (Text).
+         Zadejte místo něj interní název toho správného.
+```
+
+Řešení je předat **interní** název toho správného:
+
+```powershell
+-FixedMetadata @{ "CSD_x0020_Class" = "5.3 Car Series and Concept Docs" }
+```
+
+Co v knihovně skutečně je, ukáže diagnostický režim:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -ListFields
+```
+
+Nic nezapisuje. Vypíše všechny sloupce s interním názvem a typem, upozorní na
+duplicitní názvy a uloží úplný seznam do `export/library-fields.csv`.
+
+### Sloupce se spravovanými metadaty
+
+Do sloupce typu **TaxonomyFieldType** (Managed Metadata) nelze zapsat prostý
+text — SharePoint hodnotu zahodí a PnP jen varuje:
+
+```
+WARNING: Unable to find the specified term. Skipping values for field 'RevIMBCS'
+```
+
+Takový sloupec přijímá jen **GUID termínu** z Term Store. Skript to teď pozná
+dopředu a místo tichého zahození vypíše, o co jde. GUID se dá dohledat takto:
+
+```powershell
+Get-PnPTerm -TermGroup "<skupina>" -TermSet "<sada>" | Select-Object Name, Id
+```
+
+a předat místo textu:
+
+```powershell
+-FixedMetadata @{ "RevIMBCS" = "<guid termínu>" }
+```
+
 > Pokud je `CSD` v knihovně už založený jako **Choice**, musí `5.3 Car Series and
 > Concept Docs` být jednou z jeho možností, jinak SharePoint zápis odmítne
 > (nebo hodnotu zahodí, podle nastavení „Allow fill-in choices"). Pro sloupec
@@ -181,7 +233,10 @@ je prázdná, se přeskočí s varováním. Stejně tak název s nepovolenými z
 | `Metadata pro '<cesta>' nelze zapsat` | Sloupec neexistuje nebo má nekompatibilní typ | Zkontrolovat `-MetadataMap`, `-FixedMetadata` a typy sloupců v knihovně |
 | Hodnota z `-FixedMetadata` se nezapsala | Sloupec je Choice bez té možnosti, nebo Managed Metadata | Přidat hodnotu mezi možnosti sloupce, u Managed Metadata předat GUID termínu |
 | `A positional parameter cannot be found` u `-FixedMetadata` | Název sloupce s mezerou není v uvozovkách | `@{ "CSD Class" = "..." }` |
-| `Sloupec '<název>' v knihovně neexistuje, přeskakuji ho` | Název nesouhlasí s displejovým ani interním | Zkontrolovat podle výpisu v kroku „Sloupce pro metadata" |
+| `Sloupec '<název>' nelze jednoznačně určit, přeskakuji ho` | Víc sloupců se stejným názvem, nebo název neexistuje | Spustit s `-ListFields` a předat interní název |
+| `Název '<X>' odpovídá N sloupcům` | Duplicitní displejové názvy v knihovně | Předat interní název toho správného |
+| `Unable to find the specified term. Skipping values for field '<X>'` | Zápis textu do sloupce se spravovanými metadaty | Předat GUID termínu, ne text — viz výše |
+| `<X> nelze určit, nový nezakládám` | Nejednoznačný název, duplikát by to zhoršil | Předat interní název |
 
 ## Kam to vede dál
 

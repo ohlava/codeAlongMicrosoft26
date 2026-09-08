@@ -40,6 +40,11 @@
 .PARAMETER SkipMetadata
     Vytvoří jen složky - metadata neřeší a sloupce nezakládá.
 
+.PARAMETER ListFields
+    Nic nevytváří. Vypíše sloupce knihovny s jejich interními názvy a typy
+    a uloží je do export/library-fields.csv. Upozorní na sloupce, které mají
+    stejný displejový název. Slouží k dohledání správného interního názvu.
+
 .PARAMETER MetadataMap
     Mapování sloupců tabulky na sloupce v SharePointu. Klíč je hlavička
     v tabulce, hodnota popisuje cílový sloupec.
@@ -81,6 +86,10 @@ param(
 
     [switch] $Apply,
     [switch] $SkipMetadata,
+
+    # Jen vypíše sloupce knihovny a skončí. Slouží k dohledání interního názvu
+    # a k odhalení několika sloupců se stejným displejovým názvem.
+    [switch] $ListFields,
 
     # Prázdné = autodetekce podle hlavičky. České Excely ukládají CSV se ";".
     [string] $Delimiter = "",
@@ -321,20 +330,52 @@ function Get-TargetColumns($MetaMap, $Fixed) {
     return @($targets.Values)
 }
 
-# Mapa pro překlad na interní názvy sloupců. Set-PnPListItem přijímá interní
-# název, ale uživatel zadává ten, který vidí v SharePointu - a ten se u sloupce
-# s mezerou liší ("CSD Class" -> "CSD_x0020_Class"). PowerShellové hashtable
-# porovnávají klíče bez ohledu na velikost písmen, takže stačí jedna mapa.
-function Get-FieldNameMap($List) {
-    $map = @{}
+# Index sloupců knihovny. Jeden název může ukazovat na víc sloupců - knihovna
+# běžně obsahuje několik sloupců se stejným displejovým názvem, ale různým
+# interním názvem a typem. Proto se pod každým aliasem drží SEZNAM, ne jeden
+# sloupec: vybrat naslepo první by znamenalo zapisovat do cizího sloupce.
+function Get-FieldIndex($List) {
+    $index = @{}
+
     foreach ($field in (Get-PnPField -List $List.Id)) {
+        $descriptor = [pscustomobject]@{
+            InternalName = $field.InternalName
+            Title        = $field.Title
+            Type         = $field.TypeAsString
+            Hidden       = $field.Hidden
+        }
+
         foreach ($alias in @($field.InternalName, $field.StaticName, $field.Title)) {
-            if ($alias -and -not $map.ContainsKey($alias)) {
-                $map[$alias] = $field.InternalName
+            if (-not $alias) { continue }
+            if (-not $index.ContainsKey($alias)) { $index[$alias] = @() }
+            if ($index[$alias].InternalName -notcontains $field.InternalName) {
+                $index[$alias] += $descriptor
             }
         }
     }
-    return $map
+
+    return $index
+}
+
+# Dohledá sloupec podle zadaného názvu. Přesná shoda s interním názvem má
+# přednost před displejovým - jinak by se nešlo z nejednoznačnosti dostat.
+# Když je názvů víc a interní se netrefí, vrací $null a vypíše kandidáty.
+function Resolve-Field($Name, $FieldIndex) {
+    if (-not $FieldIndex.ContainsKey($Name)) { return $null }
+
+    $candidates = @($FieldIndex[$Name])
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+
+    $exact = @($candidates | Where-Object { $_.InternalName -eq $Name })
+    if ($exact.Count -eq 1) { return $exact[0] }
+
+    $list = ($candidates | ForEach-Object { "$($_.InternalName) ($($_.Type))" }) -join ", "
+    Add-StructureWarning "Název '$Name' odpovídá $($candidates.Count) sloupcům: $list. Zadejte místo něj interní název toho správného."
+    return $null
+}
+
+function Test-IsTaxonomyField($Field) {
+    return $Field.Type -eq "TaxonomyFieldType" -or $Field.Type -eq "TaxonomyFieldTypeMulti"
 }
 
 # Interní název pro nově zakládaný sloupec. Mezery a diakritika by se zakódovaly
@@ -346,32 +387,59 @@ function Get-SafeInternalName($Name) {
     return $clean
 }
 
-function Convert-MetadataKeys($Metadata, $FieldMap, $FolderPath) {
+function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath) {
     $converted = @{}
+
     foreach ($key in $Metadata.Keys) {
-        if ($FieldMap.ContainsKey($key)) {
-            $converted[$FieldMap[$key]] = $Metadata[$key]
+        $field = Resolve-Field $key $FieldIndex
+
+        if (-not $field) {
+            Add-StructureWarning "Sloupec '$key' nelze u '$FolderPath' jednoznačně určit, přeskakuji ho."
+            continue
         }
-        else {
-            Add-StructureWarning "Sloupec '$key' v knihovně neexistuje, u '$FolderPath' ho přeskakuji."
+
+        # Do sloupce se spravovanými metadaty nejde zapsat prostý text - PnP by
+        # jen varovalo, že termín nenašlo, a hodnotu zahodilo.
+        if ((Test-IsTaxonomyField $field) -and $Metadata[$key] -notmatch '^[0-9a-fA-F-]{36}$') {
+            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je typu $($field.Type) a přijímá jen GUID termínu, ne text '$($Metadata[$key])'. Přeskakuji ho."
+            continue
         }
+
+        $converted[$field.InternalName] = $Metadata[$key]
     }
+
     return $converted
 }
 
 function Set-MetadataColumns($List, $TargetColumns) {
-    $fieldMap = Get-FieldNameMap $List
+    $fieldIndex = Get-FieldIndex $List
 
     foreach ($target in $TargetColumns) {
         # Existující sloupec hledáme podle interního i displejového názvu.
-        $resolved = $null
+        $field = $null
         foreach ($alias in @($target.InternalName, $target.DisplayName)) {
-            if ($alias -and $fieldMap.ContainsKey($alias)) { $resolved = $fieldMap[$alias]; break }
+            if (-not $alias) { continue }
+            if ($fieldIndex.ContainsKey($alias)) {
+                $field = Resolve-Field $alias $fieldIndex
+                break
+            }
         }
 
-        if ($resolved) {
-            $note = if ($resolved -ne $target.InternalName) { " (interně $resolved)" } else { "" }
-            Write-Host "  = $($target.InternalName)$note už existuje"
+        if ($field) {
+            $note = if ($field.InternalName -ne $target.InternalName) { " -> $($field.InternalName)" } else { "" }
+            $color = if (Test-IsTaxonomyField $field) { "Yellow" } else { "Gray" }
+            Write-Host "  = $($target.InternalName)$note   typ $($field.Type)" -ForegroundColor $color
+
+            if (Test-IsTaxonomyField $field) {
+                Add-StructureWarning "Sloupec '$($target.InternalName)' je typu $($field.Type). Zapsat do něj text nelze - je potřeba GUID termínu."
+            }
+            continue
+        }
+
+        # Sloupec, jehož název byl nejednoznačný, se nezakládá - jeden takový
+        # už existuje a další duplikát by problém jen zhoršil.
+        if ($fieldIndex.ContainsKey($target.InternalName) -or $fieldIndex.ContainsKey($target.DisplayName)) {
+            Write-Host "  ! $($target.InternalName) nelze určit, nový nezakládám" -ForegroundColor Red
             continue
         }
 
@@ -389,6 +457,26 @@ function Set-MetadataColumns($List, $TargetColumns) {
             Write-Host "  + [dry-run] vytvořil bych '$($target.DisplayName)' (interně $internalName, Text)" -ForegroundColor Yellow
         }
     }
+}
+
+function Show-LibraryFields($List, $OutFolder) {
+    $fields = Get-PnPField -List $List.Id |
+        Where-Object { -not $_.FromBaseType -or -not $_.Hidden } |
+        Select-Object Title, InternalName, StaticName, TypeAsString, Hidden, Required, Group |
+        Sort-Object Title, InternalName
+
+    $fields | Format-Table Title, InternalName, TypeAsString, Hidden -AutoSize | Out-String -Width 200 | Write-Host
+
+    $duplicates = $fields | Group-Object Title | Where-Object { $_.Count -gt 1 }
+    foreach ($group in $duplicates) {
+        $names = ($group.Group | ForEach-Object { "$($_.InternalName) ($($_.TypeAsString))" }) -join ", "
+        Write-Host "  POZOR: název '$($group.Name)' má $($group.Count) sloupců: $names" -ForegroundColor Yellow
+    }
+
+    $target = "$OutFolder/library-fields.csv"
+    $fields | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
+    Write-Host ""
+    Write-Host "  Úplný seznam v $target"
 }
 
 Assert-Prerequisites
@@ -438,6 +526,12 @@ if ($list.BaseTemplate -ne 101) {
 Write-Step "Zjišťuji, co už v knihovně je"
 $existing = Get-ExistingFolderMap $list $libraryRoot
 Write-Host "  existujících složek: $($existing.Count)"
+
+if ($ListFields) {
+    Write-Step "Sloupce v knihovně $($list.Title)"
+    Show-LibraryFields $list $OutputFolder
+    return
+}
 
 if (-not $SkipMetadata) {
     Write-Step "Sloupce pro metadata"
@@ -512,7 +606,7 @@ if (-not $SkipMetadata) {
     # Znovu načíst - potřebujeme item ID právě vytvořených složek a interní
     # názvy právě založených sloupců.
     $existing = Get-ExistingFolderMap $list $libraryRoot
-    $fieldMap = Get-FieldNameMap $list
+    $fieldIndex = Get-FieldIndex $list
 
     $updated = 0
     foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
@@ -521,7 +615,7 @@ if (-not $SkipMetadata) {
             continue
         }
 
-        $values = Convert-MetadataKeys $folder.Metadata $fieldMap $folder.Path
+        $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path
         if ($values.Count -eq 0) { continue }
 
         try {
