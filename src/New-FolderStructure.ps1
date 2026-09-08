@@ -44,9 +44,18 @@
     Mapování sloupců tabulky na sloupce v SharePointu. Klíč je hlavička
     v tabulce, hodnota popisuje cílový sloupec.
 
+.PARAMETER FixedMetadata
+    Konstantní metadata vyražená na každou vytvořenou složku - klíč je interní
+    název sloupce, hodnota je text. Sloupec, který v knihovně chybí, se vytvoří
+    jako Text. Když stejný sloupec plní i tabulka, vyhrává hodnota z tabulky.
+
 .EXAMPLE
     # 1) Nejdřív se podívat, co by se stalo
     ./src/New-FolderStructure.ps1 -SiteUrl "https://contoso.sharepoint.com/sites/Proj01" -Library "Shared Documents" -Path ./Folder_Structure.xlsx
+
+.EXAMPLE
+    # Každé složce navíc nastavit CSD na pevnou hodnotu
+    ./src/New-FolderStructure.ps1 -SiteUrl "https://contoso.sharepoint.com/sites/Proj01" -Library "Shared Documents" -Path ./Folder_Structure.xlsx -FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" } -Apply
 
 .EXAMPLE
     # 2) Teprve pak vytvořit
@@ -80,7 +89,13 @@ param(
         "Made in/responsible" = @{ InternalName = "Responsible"; DisplayName = "Responsible"     }
         "English translation" = @{ InternalName = "NameEnglish"; DisplayName = "Name (English)"  }
         "German translation"  = @{ InternalName = "NameGerman";  DisplayName = "Name (Deutsch)"  }
-    }
+    },
+
+    # Konstantní metadata vyražená na každou vytvořenou složku. Klíč je interní
+    # název sloupce v SharePointu, hodnota je text, který se do něj zapíše.
+    # Příklad: -FixedMetadata @{ CSD = "5.3 Car Series and Concept Docs" }
+    # Když stejný sloupec plní i tabulka, hodnota z tabulky má přednost.
+    [hashtable] $FixedMetadata = @{}
 )
 
 $ErrorActionPreference = "Stop"
@@ -165,7 +180,7 @@ function Test-FolderNameValid($Name) {
 
 # Z tabulky udělá seznam složek s cestou, hloubkou a metadaty. Chybějící
 # mezilehlé složky doplní, i když pro ně v tabulce vlastní řádek není.
-function Get-DesiredFolders($Rows, $LevelColumns, $MetaMap) {
+function Get-DesiredFolders($Rows, $LevelColumns, $MetaMap, $Fixed) {
     $folders = [ordered]@{}
 
     foreach ($row in $Rows) {
@@ -198,11 +213,17 @@ function Get-DesiredFolders($Rows, $LevelColumns, $MetaMap) {
         for ($i = 1; $i -le $segments.Count; $i++) {
             $path = ($segments[0..($i - 1)]) -join "/"
             if (-not $folders.Contains($path)) {
+                # Vlastní kopie pro každou složku, ne odkaz na společnou tabulku.
+                $metadata = @{}
+                foreach ($fixedKey in $Fixed.Keys) {
+                    $metadata[$fixedKey] = "$($Fixed[$fixedKey])"
+                }
+
                 $folders[$path] = [pscustomobject]@{
                     Path     = $path
                     Name     = $segments[$i - 1]
                     Depth    = $i
-                    Metadata = @{}
+                    Metadata = $metadata
                     Implicit = $true
                 }
             }
@@ -276,12 +297,34 @@ function Get-ExistingFolderMap($List, $LibraryRoot) {
     return $map
 }
 
-function Set-MetadataColumns($List, $MetaMap) {
-    $existing = @(Get-PnPField -List $List.Id | Select-Object -ExpandProperty InternalName)
+# Sloupce, které musí v knihovně existovat: z -MetadataMap i z -FixedMetadata.
+function Get-TargetColumns($MetaMap, $Fixed) {
+    $targets = [ordered]@{}
 
     foreach ($key in $MetaMap.Keys) {
         $target = $MetaMap[$key]
+        $targets[$target.InternalName] = [pscustomobject]@{
+            InternalName = $target.InternalName
+            DisplayName  = $target.DisplayName
+        }
+    }
 
+    foreach ($key in $Fixed.Keys) {
+        if (-not $targets.Contains($key)) {
+            $targets[$key] = [pscustomobject]@{
+                InternalName = $key
+                DisplayName  = $key
+            }
+        }
+    }
+
+    return @($targets.Values)
+}
+
+function Set-MetadataColumns($List, $TargetColumns) {
+    $existing = @(Get-PnPField -List $List.Id | Select-Object -ExpandProperty InternalName)
+
+    foreach ($target in $TargetColumns) {
         if ($existing -contains $target.InternalName) {
             Write-Host "  = $($target.InternalName) už existuje"
             continue
@@ -319,9 +362,15 @@ if ($unknownMeta.Count -gt 0) {
     Add-StructureWarning "Sloupce z -MetadataMap, které v tabulce nejsou (ignoruji je): $($unknownMeta -join ', ')"
 }
 
-$desired = Get-DesiredFolders $rows $levelColumns $MetadataMap
+$desired = Get-DesiredFolders $rows $levelColumns $MetadataMap $FixedMetadata
 $maxDepth = ($desired | Measure-Object -Property Depth -Maximum).Maximum
 Write-Host "  složek k zajištění: $($desired.Count), nejhlubší úroveň: $maxDepth"
+
+if ($FixedMetadata.Count -gt 0) {
+    $fixedText = (($FixedMetadata.GetEnumerator() | Sort-Object Name |
+                   ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "; ")
+    Write-Host "  konstantní metadata na každé složce: $fixedText"
+}
 
 Write-Step "Připojuji se k $SiteUrl"
 Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
@@ -389,7 +438,7 @@ if (-not $Apply) {
 
 if (-not $SkipMetadata) {
     Write-Step "Zajišťuji sloupce pro metadata"
-    Set-MetadataColumns $list $MetadataMap
+    Set-MetadataColumns $list (Get-TargetColumns $MetadataMap $FixedMetadata)
 }
 
 Write-Step "Vytvářím složky"
