@@ -40,6 +40,11 @@
 .PARAMETER SkipMetadata
     Vytvoří jen složky - metadata neřeší a sloupce nezakládá.
 
+.PARAMETER UnlockReadOnlyFields
+    Sloupec označený ReadOnlyField zápis tiše zahodí. S tímto přepínačem ho
+    skript před zápisem odemkne a po dokončení vrátí zpět na ReadOnly - i když
+    zápis mezitím selže. Vyžaduje právo měnit sloupce knihovny.
+
 .PARAMETER ListFields
     Nic nevytváří. Vypíše sloupce knihovny s jejich interními názvy a typy
     a uloží je do export/library-fields.csv. Upozorní na sloupce, které mají
@@ -90,6 +95,10 @@ param(
     # Jen vypíše sloupce knihovny a skončí. Slouží k dohledání interního názvu
     # a k odhalení několika sloupců se stejným displejovým názvem.
     [switch] $ListFields,
+
+    # Sloupce označené ReadOnlyField na dobu zápisu odemkne a na konci je vrátí
+    # zpět na ReadOnly, i když zápis selže.
+    [switch] $UnlockReadOnlyFields,
 
     # Prázdné = autodetekce podle hlavičky. České Excely ukládají CSV se ";".
     [string] $Delimiter = "",
@@ -254,7 +263,7 @@ function Get-DesiredFolders($Rows, $LevelColumns, $MetaMap, $Fixed) {
 
 # Knihovnu hledá podle GUIDu, názvu i cesty. Systémové knihovny vynechává.
 function Resolve-Library($Identity) {
-    $allLists = Get-PnPList -Includes RootFolder
+    $allLists = Get-PnPList -Includes RootFolder, ForceCheckout
 
     $match = $allLists | Where-Object { $_.Id.ToString() -eq $Identity }
     if (-not $match) { $match = $allLists | Where-Object { $_.Title -eq $Identity } }
@@ -343,6 +352,8 @@ function Get-FieldIndex($List) {
             Title        = $field.Title
             Type         = $field.TypeAsString
             Hidden       = $field.Hidden
+            ReadOnly     = $field.ReadOnlyField
+            Sealed       = $field.Sealed
         }
 
         foreach ($alias in @($field.InternalName, $field.StaticName, $field.Title)) {
@@ -398,6 +409,17 @@ function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath) {
             continue
         }
 
+        # Do sloupce označeného ReadOnlyField SharePoint zápis tiše zahodí -
+        # Set-PnPListItem projde bez chyby, ale hodnota se neuloží.
+        if ($field.ReadOnly -and -not $UnlockReadOnlyFields) {
+            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je ReadOnly, zápis by se zahodil. Použijte -UnlockReadOnlyFields, nebo ho odemkněte ručně."
+            continue
+        }
+
+        if ($field.Sealed) {
+            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je Sealed - mění se jen na úrovni content typu, ne tady."
+        }
+
         # Do sloupce se spravovanými metadaty nejde zapsat prostý text - PnP by
         # jen varovalo, že termín nenašlo, a hodnotu zahodilo.
         if ((Test-IsTaxonomyField $field) -and $Metadata[$key] -notmatch '^[0-9a-fA-F-]{36}$') {
@@ -427,8 +449,15 @@ function Set-MetadataColumns($List, $TargetColumns) {
 
         if ($field) {
             $note = if ($field.InternalName -ne $target.InternalName) { " -> $($field.InternalName)" } else { "" }
-            $color = if (Test-IsTaxonomyField $field) { "Yellow" } else { "Gray" }
-            Write-Host "  = $($target.InternalName)$note   typ $($field.Type)" -ForegroundColor $color
+            $flags = @()
+            if ($field.ReadOnly) { $flags += "ReadOnly" }
+            if ($field.Sealed)   { $flags += "Sealed" }
+            if ($field.Hidden)   { $flags += "Hidden" }
+            $flagText = if ($flags.Count -gt 0) { "   [$($flags -join ', ')]" } else { "" }
+
+            $problem = (Test-IsTaxonomyField $field) -or $field.ReadOnly -or $field.Sealed
+            $color = if ($problem) { "Yellow" } else { "Gray" }
+            Write-Host "  = $($target.InternalName)$note   typ $($field.Type)$flagText" -ForegroundColor $color
 
             if (Test-IsTaxonomyField $field) {
                 Add-StructureWarning "Sloupec '$($target.InternalName)' je typu $($field.Type). Zapsat do něj text nelze - je potřeba GUID termínu."
@@ -459,13 +488,54 @@ function Set-MetadataColumns($List, $TargetColumns) {
     }
 }
 
+# Přepne ReadOnlyField na $false a vrátí seznam sloupců, které přepnula, aby
+# se daly vrátit zpět. Volající to MUSÍ vrátit ve finally bloku.
+function Disable-FieldReadOnly($List, $FieldNames) {
+    $unlocked = @()
+
+    foreach ($name in $FieldNames) {
+        try {
+            Set-PnPField -List $List.Id -Identity $name -Values @{ ReadOnlyField = $false } -ErrorAction Stop | Out-Null
+            $unlocked += $name
+            Write-Host "  odemčen $name" -ForegroundColor Yellow
+        }
+        catch {
+            Add-StructureWarning "Sloupec '$name' nelze odemknout: $($_.Exception.Message)"
+        }
+    }
+
+    return @($unlocked)
+}
+
+function Enable-FieldReadOnly($List, $FieldNames) {
+    foreach ($name in $FieldNames) {
+        try {
+            Set-PnPField -List $List.Id -Identity $name -Values @{ ReadOnlyField = $true } -ErrorAction Stop | Out-Null
+            Write-Host "  zamčen zpět $name" -ForegroundColor Yellow
+        }
+        catch {
+            # Tohle je nutné říct nahlas - sloupec zůstal zapisovatelný.
+            Add-StructureWarning "POZOR: sloupec '$name' se nepodařilo vrátit na ReadOnly: $($_.Exception.Message). Vraťte ho ručně."
+        }
+    }
+}
+
 function Show-LibraryFields($List, $OutFolder) {
     $fields = Get-PnPField -List $List.Id |
         Where-Object { -not $_.FromBaseType -or -not $_.Hidden } |
-        Select-Object Title, InternalName, StaticName, TypeAsString, Hidden, Required, Group |
+        Select-Object Title, InternalName, StaticName, TypeAsString, ReadOnlyField, Sealed, Hidden, Required, Group |
         Sort-Object Title, InternalName
 
-    $fields | Format-Table Title, InternalName, TypeAsString, Hidden -AutoSize | Out-String -Width 200 | Write-Host
+    $fields | Format-Table Title, InternalName, TypeAsString, ReadOnlyField, Sealed, Hidden -AutoSize |
+        Out-String -Width 220 | Write-Host
+
+    $blocked = @($fields | Where-Object { $_.ReadOnlyField -or $_.Sealed })
+    foreach ($field in $blocked) {
+        $why = @()
+        if ($field.ReadOnlyField) { $why += "ReadOnly" }
+        if ($field.Sealed) { $why += "Sealed" }
+        Write-Host "  POZOR: do '$($field.Title)' ($($field.InternalName)) nelze zapisovat: $($why -join ', ')" -ForegroundColor Yellow
+    }
 
     $duplicates = $fields | Group-Object Title | Where-Object { $_.Count -gt 1 }
     foreach ($group in $duplicates) {
@@ -521,6 +591,23 @@ Write-Host "  Id:       $($list.Id)"
 
 if ($list.BaseTemplate -ne 101) {
     Add-StructureWarning "'$($list.Title)' není knihovna dokumentů (BaseTemplate $($list.BaseTemplate)). Zkontrolujte parametr -Library."
+}
+
+# Uzamčení celé webové kolekce se z tohoto skriptu odemknout nedá - je na to
+# potřeba SharePoint Administrator a připojení do admin centra. Aspoň to ale
+# poznáme a řekneme, místo aby zápisy tiše nic nedělaly.
+try {
+    $site = Get-PnPSite -Includes ReadOnly -ErrorAction Stop
+    if ($site.ReadOnly) {
+        Add-StructureWarning "Celá webová kolekce je v režimu ReadOnly - žádný zápis neprojde. Odemčení vyžaduje SharePoint Administrator, viz docs/07-struktura-slozek-z-excelu.md."
+    }
+}
+catch {
+    Write-Verbose "Stav uzamčení webu nelze zjistit: $($_.Exception.Message)"
+}
+
+if ($list.ForceCheckout) {
+    Add-StructureWarning "Knihovna vyžaduje Check-out (ForceCheckout). Zápis metadat na složky tím může být blokovaný."
 }
 
 Write-Step "Zjišťuji, co už v knihovně je"
@@ -608,28 +695,60 @@ if (-not $SkipMetadata) {
     $existing = Get-ExistingFolderMap $list $libraryRoot
     $fieldIndex = Get-FieldIndex $list
 
-    $updated = 0
-    foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
-        if (-not $existing.ContainsKey($folder.Path)) {
-            Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat - složka v knihovně není."
-            continue
+    # Sloupce, do kterých se má zapisovat a které jsou zamčené na ReadOnly.
+    $lockedFields = @()
+    if ($UnlockReadOnlyFields) {
+        $wantedKeys = @($desired | ForEach-Object { $_.Metadata.Keys } | Sort-Object -Unique)
+        foreach ($key in $wantedKeys) {
+            $field = Resolve-Field $key $fieldIndex
+            if ($field -and $field.ReadOnly) { $lockedFields += $field.InternalName }
+        }
+        $lockedFields = @($lockedFields | Sort-Object -Unique)
+    }
+
+    $unlockedFields = @()
+
+    try {
+        if ($lockedFields.Count -gt 0) {
+            Write-Host "  odemykám $($lockedFields.Count) ReadOnly sloupců na dobu zápisu" -ForegroundColor Yellow
+            $unlockedFields = Disable-FieldReadOnly $list $lockedFields
+
+            # Po odemčení je index zastaralý - příznak ReadOnly už neplatí.
+            $fieldIndex = Get-FieldIndex $list
         }
 
-        $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path
-        if ($values.Count -eq 0) { continue }
+        $updated = 0
+        foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
+            if (-not $existing.ContainsKey($folder.Path)) {
+                Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat - složka v knihovně není."
+                continue
+            }
 
-        try {
-            Set-PnPListItem -List $list.Id `
-                -Identity $existing[$folder.Path] `
-                -Values $values `
-                -ErrorAction Stop | Out-Null
-            $updated++
+            $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path
+            if ($values.Count -eq 0) { continue }
+
+            try {
+                Set-PnPListItem -List $list.Id `
+                    -Identity $existing[$folder.Path] `
+                    -Values $values `
+                    -ErrorAction Stop | Out-Null
+                $updated++
+            }
+            catch {
+                Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
+            }
         }
-        catch {
-            Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
+        Write-Host "  aktualizováno složek: $updated"
+    }
+    finally {
+        # Zamknout zpět za všech okolností, i když zápis spadl nebo ho někdo
+        # přerušil - jinak by knihovna zůstala otevřená k editaci.
+        if ($unlockedFields.Count -gt 0) {
+            Write-Host ""
+            Write-Host "  vracím sloupce na ReadOnly" -ForegroundColor Yellow
+            Enable-FieldReadOnly $list $unlockedFields
         }
     }
-    Write-Host "  aktualizováno složek: $updated"
 }
 
 Write-WarningSummary

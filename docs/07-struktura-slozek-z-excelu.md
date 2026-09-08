@@ -221,6 +221,75 @@ a ani ji nehlásí jako chybu. Odstranění je vždy na člověku.
 je prázdná, se přeskočí s varováním. Stejně tak název s nepovolenými znaky
 (`" * : < > ? / \ |`), s mezerou na konci nebo končící tečkou.
 
+## Když se metadata nezapíšou a nic nehlásí chybu
+
+SharePoint umí zápis tiše zahodit. `Set-PnPListItem` projde bez chyby, ale
+hodnota se neuloží. Příčin je několik a liší se tím, kde se odemykají.
+
+Nejdřív diagnostika — nic nezapisuje:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Shared Documents" -Path .\Folder_Structure.xlsx -ListFields
+```
+
+Vypíše u každého sloupce příznaky `ReadOnlyField`, `Sealed` a `Hidden` a zvlášť
+upozorní na ty, do kterých zapisovat nelze.
+
+### 1. Sloupec je ReadOnly
+
+Nejčastější případ. Skript to teď pozná a odmítne zápis s vysvětlením místo
+tichého selhání. Odemknout na dobu zápisu a hned vrátit zpět umí sám:
+
+```powershell
+-UnlockReadOnlyFields
+```
+
+Sloupce, které byly zamčené, odemkne, zapíše metadata a **na konci je vrátí zpět
+na ReadOnly** — i když zápis mezitím selže, protože vrácení je ve `finally`
+bloku. Kdyby se vrácení nepodařilo, napíše to jako varování začínající `POZOR:`.
+Takové hlášení nepřehlédněte a sloupec vraťte ručně.
+
+Vyžaduje právo měnit sloupce knihovny (vlastník webu).
+
+### 2. Sloupec je Sealed
+
+Sealed sloupec pochází z content typu a na úrovni knihovny se změnit nedá.
+Skript na to upozorní, ale sám s tím nic neudělá — mění se u content typu
+v Content Type Gallery, což je zásah do sdílené definice, ne do jednoho webu.
+
+### 3. Celá webová kolekce je uzamčená
+
+Pak neprojde žádný zápis, ani vytvoření složky. Skript stav přečte a upozorní.
+
+**Odemčení z tohoto skriptu nejde** — je na to potřeba role SharePoint
+Administrator a připojení do admin centra, tedy na jinou URL:
+
+```powershell
+Connect-PnPOnline -Url "https://<tenant>-admin.sharepoint.com" -Interactive -ClientId "<guid>"
+
+# stav
+Get-PnPTenantSite -Identity "https://<tenant>.sharepoint.com/sites/<web>" -Detailed | Select-Object Url, LockState
+
+# odemknout
+Set-PnPTenantSite -Identity "https://<tenant>.sharepoint.com/sites/<web>" -LockState Unlock
+
+# ... spustit skript ...
+
+# vrátit zpět
+Set-PnPTenantSite -Identity "https://<tenant>.sharepoint.com/sites/<web>" -LockState ReadOnly
+```
+
+> Než web odemknete, zjistěte **proč** je zamčený. Read-only bývá výsledek
+> archivace nebo retenční politiky, a v takovém případě je uzamčení záměr, ne
+> překážka — odemčení by šlo proti governance a je to rozhodnutí správce
+> tenantu, ne toho, kdo spouští skript. Změnu stavu si někam zapište, aby se
+> nezapomnělo vrátit.
+
+### 4. Knihovna vyžaduje Check-out
+
+Při `ForceCheckout` je potřeba položku před editací vyzvednout. Skript na to
+upozorní; nastavení se vypíná ve verzování knihovny.
+
 ## Když to nejde
 
 | Hláška | Co to znamená | Řešení |
@@ -237,6 +306,11 @@ je prázdná, se přeskočí s varováním. Stejně tak název s nepovolenými z
 | `Název '<X>' odpovídá N sloupcům` | Duplicitní displejové názvy v knihovně | Předat interní název toho správného |
 | `Unable to find the specified term. Skipping values for field '<X>'` | Zápis textu do sloupce se spravovanými metadaty | Předat GUID termínu, ne text — viz výše |
 | `<X> nelze určit, nový nezakládám` | Nejednoznačný název, duplikát by to zhoršil | Předat interní název |
+| `Sloupec '<X>' je ReadOnly, zápis by se zahodil` | Sloupec je uzamčený | `-UnlockReadOnlyFields`, viz výše |
+| `Sloupec '<X>' je Sealed` | Sloupec je z content typu | Změnit u content typu, ne na knihovně |
+| `Celá webová kolekce je v režimu ReadOnly` | Site lock | Odemčení přes admin centrum, viz výše |
+| `POZOR: sloupec '<X>' se nepodařilo vrátit na ReadOnly` | Selhalo zamčení zpět | **Vrátit ručně** přes `Set-PnPField -Values @{ReadOnlyField=$true}` |
+| `Knihovna vyžaduje Check-out` | ForceCheckout | Vypnout v nastavení verzování knihovny |
 
 ## Kam to vede dál
 
