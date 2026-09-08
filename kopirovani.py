@@ -374,14 +374,26 @@ def copy_list_fields(src, tgt, list_title):
 
 def _get_view_fields(sp, list_title, vtitle):
     """Natahne SEZNAM sloupcu (internal names) zobrazenych ve view.
-    ViewFields NELZE ziskat pres $select - je nutny dedikovany endpoint."""
+    ViewFields NELZE ziskat pres $select - je nutny dedikovany endpoint.
+    Struktura odpovedi (odata=verbose): d.Items.results = ['Title','Ano_x002f_ne',...]"""
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
                f"/getbytitle('{odata(vtitle)}')/viewfields")
     if r.status_code != 200:
+        log(f"        (!) nelze cist viewfields '{vtitle}': {r.status_code}")
         return []
-    d = r.json()["d"]
-    # struktura: d.Items.results = ["Title","Ano_x002f_ne",...]
-    return d.get("Items", {}).get("results", []) or []
+    try:
+        d = r.json()["d"]
+    except Exception:
+        return []
+    # robustne pro ruzne struktury
+    items = d.get("Items")
+    if isinstance(items, dict):
+        res = items.get("results")
+        if isinstance(res, list):
+            return res
+    if isinstance(d.get("results"), list):
+        return d["results"]
+    return []
 
 
 def copy_views(src, tgt, list_title):
@@ -441,15 +453,40 @@ def _update_view(tgt, list_title, vtitle, v):
                                              extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
              data=json.dumps(body))
 
+def _target_field_exists(tgt, list_title, internal):
+    r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+                f"/getbyinternalnameortitle('{odata(internal)}')?$select=InternalName")
+    return r.status_code == 200
+
 def _set_view_fields(tgt, list_title, vtitle, fields):
-    """Nastavi zobrazene sloupce view: nejdriv smaze vse, pak prida ze zdroje."""
+    """Nastavi zobrazene sloupce view: nejdriv smaze vse, pak prida ze zdroje.
+    Pouziva SPOLEHLIVEJSI variantu addviewfield s telem {'strField': ...}."""
     base = (f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
             f"/getbytitle('{odata(vtitle)}')/viewfields")
-    tgt.post(base + "/removeallviewfields", extra_headers=tgt.write_headers())
+    rm = tgt.post(base + "/removeallviewfields", extra_headers=tgt.write_headers())
+    if rm.status_code not in (200, 204):
+        log(f"        (!) removeallviewfields selhalo: {rm.status_code} {rm.text[:150]}")
+    added, skipped = 0, 0
     for fn in fields:
-        r = tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
-        if r.status_code not in (200, 204):
-            log(f"        (!) sloupec '{fn}' nelze pridat do view: {r.status_code}")
+        # pridavej jen sloupce, ktere na cili realne existuji (jinak 400/500)
+        if not _target_field_exists(tgt, list_title, fn):
+            log(f"        (!) sloupec '{fn}' na cili neexistuje - preskakuji ve view")
+            skipped += 1
+            continue
+        r = tgt.post(base + "/addviewfield",
+                     extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                     data=json.dumps({"strField": fn}))
+        if r.status_code in (200, 204):
+            added += 1
+        else:
+            # fallback na URL variantu
+            r2 = tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
+            if r2.status_code in (200, 204):
+                added += 1
+            else:
+                log(f"        (!) sloupec '{fn}' nelze pridat: {r.status_code}/{r2.status_code} {r.text[:120]}")
+    log(f"        -> view '{vtitle}': pridano {added} sloupcu"
+        + (f", preskoceno {skipped}" if skipped else ""))
 
 
 # ============================ NAVIGACE (Quick Launch + horni menu) ==========
@@ -470,14 +507,37 @@ def _is_system_nav_url(u):
     low = u.lower()
     return "/_layouts/" in low or "viewlsts.aspx" in low
 
+# Provideri pro MenuState (moderni navigace). Quick Launch = Current, horni = Global.
+_NAV_PROVIDERS = {
+    "quicklaunch": "CurrentNavSiteMapProviderNoEncode",
+    "topnavigationbar": "GlobalNavSiteMapProvider",
+}
+
 def _get_nav_nodes(sp, which):
-    """which = 'quicklaunch' | 'topnavigationbar'. Vrati stromovou strukturu."""
+    """Precte navigaci. NEJDRIV zkusi MenuState (zachyti i moderni navigaci),
+    pak fallback na klasicky /navigation/{which}."""
+    # --- 1) MenuState provider ---
+    provider = _NAV_PROVIDERS.get(which)
+    if provider:
+        r = sp.get(f"/_api/navigation/menustate?mapprovidername='{provider}'")
+        if r.status_code == 200:
+            try:
+                nodes = r.json()["d"]["MenuState"]["Nodes"]["results"]
+            except Exception:
+                nodes = []
+            if nodes:
+                def _conv(n):
+                    return {"Title": n.get("Title") or "", "Url": n.get("SimpleUrl") or n.get("FriendlyUrlSegment") or "",
+                            "IsExternal": False,
+                            "Children": [_conv(c) for c in n.get("Nodes", {}).get("results", [])]}
+                return [_conv(n) for n in nodes]
+    # --- 2) fallback: klasicky endpoint ---
     r = sp.get(f"/_api/web/navigation/{which}?$expand=Children")
     if r.status_code != 200:
         return []
     out = []
     for n in r.json()["d"]["results"]:
-        kids = [{"Title": c["Title"], "Url": c["Url"], "IsExternal": c.get("IsExternal", False)}
+        kids = [{"Title": c["Title"], "Url": c["Url"], "IsExternal": c.get("IsExternal", False), "Children": []}
                 for c in (n.get("Children", {}).get("results", []))]
         out.append({"Title": n["Title"], "Url": n["Url"],
                     "IsExternal": n.get("IsExternal", False), "Children": kids})
@@ -496,13 +556,16 @@ def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
     if _is_system_nav_url(url):
         log(f"        (i) preskakuji systemovy nav uzel '{title}' ({url})")
         return None
+    if not (title or "").strip():
+        return None
     if parent_id is not None:
         endpoint = f"/_api/web/navigation/getnodebyid({parent_id})/children"
     else:
         endpoint = f"/_api/web/navigation/{which}"
-    remapped = _remap_url(url)
-    # pokud odkaz stale miri na zdrojovy web, oznac jako externi (aby SP neveril, ze je lokalni)
-    still_external = bool(is_external) or ("/sites/" in (url or "") and SOURCE_SITE.split(".com",1)[1] in (url or "") and remapped == url)
+    remapped = _remap_url(url) or ""
+    # odkaz na zdrojovy web, ktery se nepremapoval -> oznac jako externi
+    src_path = SOURCE_SITE.split(".com", 1)[1]
+    still_external = bool(is_external) or (src_path in (url or "") and remapped == url)
     body = {"__metadata": {"type": "SP.NavigationNode"},
             "Title": title, "Url": remapped, "IsExternal": still_external}
     try:
@@ -511,7 +574,17 @@ def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
                      data=json.dumps(body))
         if r.status_code in (200, 201):
             return r.json()["d"]["Id"]
-        log(f"        !!! nav uzel '{title}' preskocen: {r.status_code} {r.text[:120]}")
+        # casta chyba: cilovy odkaz jeste neexistuje -> zaloz jako externi a preURL-uj
+        if not still_external:
+            body["IsExternal"] = True
+            r2 = tgt.post(endpoint,
+                          extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                          data=json.dumps(body))
+            if r2.status_code in (200, 201):
+                return r2.json()["d"]["Id"]
+            log(f"        !!! nav uzel '{title}' preskocen: {r.status_code}/{r2.status_code} {r2.text[:120]}")
+        else:
+            log(f"        !!! nav uzel '{title}' preskocen: {r.status_code} {r.text[:120]}")
     except Exception as e:
         log(f"        !!! nav uzel '{title}' vyjimka: {e}")
     return None
@@ -523,17 +596,23 @@ def copy_navigation(src, tgt):
     for which, label in (("quicklaunch", "Quick Launch"), ("topnavigationbar", "Horni menu")):
         nodes = _get_nav_nodes(src, which)
         log(f"  [{label}] nalezeno {len(nodes)} uzlu na zdroji")
-        if DRY_RUN:
-            for n in nodes:
-                log(f"    - {n['Title']} ({n['Url']})")
-                for c in n["Children"]:
-                    log(f"        - {c['Title']} ({c['Url']})")
+        for n in nodes:
+            log(f"    - {n['Title']} ({n['Url']})")
+            for c in n.get("Children", []):
+                log(f"        - {c['Title']} ({c['Url']})")
+        if DRY_RUN or not nodes:
             continue
         _clear_nav(tgt, which)
+        added = 0
         for n in nodes:
-            pid = _add_nav_node(tgt, which, n["Title"], n["Url"], n["IsExternal"])
-            for c in n["Children"]:
-                _add_nav_node(tgt, which, c["Title"], c["Url"], c["IsExternal"], parent_id=pid)
+            pid = _add_nav_node(tgt, which, n["Title"], n["Url"], n.get("IsExternal", False))
+            if pid:
+                added += 1
+            for c in n.get("Children", []):
+                cid = _add_nav_node(tgt, which, c["Title"], c["Url"], c.get("IsExternal", False), parent_id=pid)
+                if cid:
+                    added += 1
+        log(f"  [{label}] -> nastaveno {added} uzlu na cili")
 
 
 # ============================ VYPIS OBSAHU ==========
