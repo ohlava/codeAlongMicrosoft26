@@ -33,53 +33,39 @@ TARGET_COOKIE_FILE = "target_cookies.txt"
 PROXY = "http://127.0.0.1:9001"          # <-- dopln svoji proxy (nebo nastav None)
 proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 
-# Bezpecnostni prepinace
 DRY_RUN = False                  # True = nic nezapisuje, jen simuluje a loguje
 DELETE_TARGET_CONTENT = True    # True = pred kopirovanim smaze OBSAH odpovidajiciho seznamu na cili
 PRINT_CONTENTS = True           # True = podrobne vypise obsah kazdeho seznamu na zdroji
+COPY_SOURCE_FIELDS = True       # True = vytvori na cili chybejici sloupce ze zdroje (vc. taxonomy)
+COPY_SITE_ASSETS = True         # True = zkopiruje SiteAssets/Style Library (obrazky, bannery)
+COPY_WELCOME_PAGE = True        # True = nastavi domovskou stranku (WelcomePage) dle zdroje
+CREATE_MISSING_LISTS = True     # True = vytvori na cili seznamy/knihovny, ktere existuji jen na zdroji
+COPY_VIEWS = True               # True = prevezme zobrazeni (views) seznamu ze zdroje
+COPY_NAVIGATION = True          # True = prevezme navigaci (Quick Launch + horni menu) ze zdroje
 
-# Prah pro chunked upload a velikost chunku
-SMALL_FILE_LIMIT = 2 * 1024 * 1024     # <=2 MB -> primy Files/add
-CHUNK_SIZE       = 8 * 1024 * 1024     # 8 MB na chunk pro velke soubory
-
-# Digest se preventivne obnovi po tolika sekundach (limit je 1800 s)
+SMALL_FILE_LIMIT = 2 * 1024 * 1024
+CHUNK_SIZE       = 8 * 1024 * 1024
 DIGEST_TTL = 1500
 
-# Interni (jazykove NEZAVISLE) cesty systemovych knihoven, ktere se nikdy nekopiruji.
-SYSTEM_LIBRARY_PATH_SUFFIXES = (
-    "/SiteAssets",
-    "/Style Library",
-    "/FormServerTemplates",
-    "/_catalogs",
-    "/_private",
+# --- KSU trida na slozkach ---
+SET_KSU_CLASS = True
+KSU_FIELD_VALUE = "5.3"
+KSU_TERM_GUID  = "f180d7d0-51f7-4ecb-b85b-8794451fa5fb"   # term 5.3
+KSU_TERM_LABEL = "5.3"
+KSU_FIELD_TITLE_CANDIDATES = (
+    "CSD class", "CSD Class", "CSDclass", "CSD",
+    "Trida KSU", "Třída KSU", "KSU Klasse", "KSU-Klasse", "KSU Class", "KSU",
 )
 
+SYSTEM_LIBRARY_PATH_SUFFIXES = (
+    "/SiteAssets", "/Style Library", "/FormServerTemplates", "/_catalogs", "/_private",
+)
 SITE_PAGES_PATH_SUFFIX = "/SitePages"
-
 SYSTEM_LIST_TITLES = {
     "User Information List", "Access Requests", "Workflow History",
     "Workflow Tasks", "TaxonomyHiddenList", "Cache Profiles",
     "Long Running Operation Status", "Maintenance Log Library",
 }
-
-# --- Trida KSU (Klassifizierungssystem fuer Unterlagen) na slozkach ---
-# Po vytvoreni kazde slozky na cili se nastavi KSU trida na tuto hodnotu.
-SET_KSU_CLASS = True
-KSU_FIELD_VALUE = "5.3"
-# Pokud je KSU sloupec typu Managed Metadata (Taxonomy), potrebujeme GUID termu.
-# GUID termu '5.3' byl zjisten z term-store dumpu (5.3 Car Series and Concept Docs).
-# Kdyz je vyplneno, preskoci se automaticke hledani (nejrychlejsi a spolehlive):
-KSU_TERM_GUID  = "f180d7d0-51f7-4ecb-b85b-8794451fa5fb"
-# Label termu pro ValidateUpdateListItem (staci prefix '5.3'; SP resolvuje dle GUID).
-KSU_TERM_LABEL = "5.3"
-# Interni nazev sloupce neni napevno (lisi se dle knihovny/jazyka), skript ho
-# dohleda podle zobrazovaneho nazvu. Doplneno vice kandidatu (CZ i DE).
-KSU_FIELD_TITLE_CANDIDATES = (
-    # CSD = Classification System for Documents (EN preklad nemeckeho KSU)
-    "CSD class", "CSD Class", "CSDclass", "CSD",
-    "Třída KSU", "Trida KSU", "KSU třída", "KSU trida",
-    "KSU Klasse", "KSU-Klasse", "KSU Class", "KSU",
-)
 
 LOG_FILE = "copy_log.txt"
 
@@ -95,19 +81,14 @@ def save_log():
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(_log_lines))
 
-
 def odata(s):
-    """Escape apostrofu pro OData literal ('...'). Apostrof se zdvojuje."""
     return str(s).replace("'", "''")
 
-
 def has_unsupported_chars(name):
-    """REST endpointy GetFileByServerRelativeUrl nepodporuji % a #."""
     return "%" in name or "#" in name
 
 
 def parse_cookie_line(line, cookies_dict):
-    """Robustni parser - zvladne 3 formaty zapisu cookies."""
     line = line.strip().rstrip(",")
     if not line or line.startswith("#"):
         return
@@ -133,13 +114,11 @@ def load_cookies(path):
         for raw_line in f:
             parse_cookie_line(raw_line, cookies)
     if "FedAuth" not in cookies or "rtFa" not in cookies:
-        raise SystemExit(f"!!! V souboru '{path}' chybi FedAuth nebo rtFa. Zkontroluj format.")
+        raise SystemExit(f"!!! V souboru '{path}' chybi FedAuth nebo rtFa.")
     return cookies
 
 
 class SPSession:
-    """Obalka nad requests.Session pro jeden SharePoint web (site)."""
-
     def __init__(self, site_url, cookie_file):
         self.site = site_url.rstrip("/")
         self.cookies = load_cookies(cookie_file)
@@ -162,7 +141,6 @@ class SPSession:
             h.update(extra)
         return h
 
-    # --- HTTP s jednoduchym retry na throttling (429/503) ---
     def _request(self, method, endpoint, headers=None, **kwargs):
         url = self.site + endpoint
         for attempt in range(4):
@@ -182,7 +160,6 @@ class SPSession:
         return self._request("POST", endpoint, headers=extra_headers, **kwargs)
 
     def digest(self):
-        """Ziska (a preventivne obnovuje) X-RequestDigest. Plati jen 1800 s."""
         now = time.time()
         if self._digest and (now - self._digest_ts) < DIGEST_TTL:
             return self._digest
@@ -208,12 +185,12 @@ def get_entity_type_full_name(sp, list_title):
     if key in _entity_type_cache:
         return _entity_type_cache[key]
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')?$select=ListItemEntityTypeFullName")
-    entity_type = r.json()["d"]["ListItemEntityTypeFullName"] if r.status_code == 200 else "SP.Data.ListItem"
-    _entity_type_cache[key] = entity_type
-    return entity_type
+    et = r.json()["d"]["ListItemEntityTypeFullName"] if r.status_code == 200 else "SP.Data.ListItem"
+    _entity_type_cache[key] = et
+    return et
 
 
-# ============================ ZISKANI SEZNAMU SEZNAMU =======================
+# ============================ SEZNAM SEZNAMU =======================
 
 def is_system_library(lst):
     if lst["BaseType"] != 1:
@@ -222,18 +199,15 @@ def is_system_library(lst):
     return any(root.rstrip("/").endswith(suf) or (suf + "/") in root
                for suf in SYSTEM_LIBRARY_PATH_SUFFIXES)
 
-
 def is_site_pages_library(lst):
     root = lst["RootFolder"]["ServerRelativeUrl"]
     return root.rstrip("/").endswith(SITE_PAGES_PATH_SUFFIX.strip("/"))
 
-
 def get_lists(sp):
-    r = sp.get(
-        "/_api/web/lists"
-        "?$select=Title,BaseTemplate,BaseType,Hidden,ItemCount,RootFolder/ServerRelativeUrl"
-        "&$expand=RootFolder"
-    )
+    r = sp.get("/_api/web/lists"
+               "?$select=Title,BaseTemplate,BaseType,Hidden,ItemCount,Description,"
+               "EnableFolderCreation,ContentTypesEnabled,RootFolder/ServerRelativeUrl"
+               "&$expand=RootFolder")
     r.raise_for_status()
     results = []
     for lst in r.json()["d"]["results"]:
@@ -246,10 +220,9 @@ def get_lists(sp):
         results.append(lst)
     return results
 
-
 def get_fields(sp, list_title):
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
-               "?$select=Title,InternalName,TypeAsString,ReadOnlyField,Hidden,FromBaseType")
+               "?$select=Id,Title,InternalName,TypeAsString,ReadOnlyField,Hidden,FromBaseType")
     r.raise_for_status()
     fields = r.json()["d"]["results"]
     return [f for f in fields
@@ -258,7 +231,254 @@ def get_fields(sp, list_title):
             and not f["FromBaseType"]]
 
 
-# ============================ PODROBNY VYPIS OBSAHU (DIAGNOSTIKA) ==========
+# ============================ VYTVORENI CHYBEJICICH SEZNAMU ================
+
+def list_exists(tgt, list_title):
+    r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')?$select=Title")
+    return r.status_code == 200
+
+def ensure_list_exists(src, tgt, lst):
+    """Vytvori seznam/knihovnu na cili dle zdroje, pokud tam neexistuje."""
+    if not CREATE_MISSING_LISTS:
+        return
+    title = lst["Title"]
+    if list_exists(tgt, title):
+        return
+    log(f"  [SEZNAM] '{title}' na cili neexistuje -> vytvarim "
+        f"(BaseTemplate={lst['BaseTemplate']})")
+    if DRY_RUN:
+        return
+    body = {
+        "__metadata": {"type": "SP.List"},
+        "Title": title,
+        "BaseTemplate": lst["BaseTemplate"],
+        "Description": lst.get("Description", "") or "",
+        "ContentTypesEnabled": bool(lst.get("ContentTypesEnabled")),
+        "AllowContentTypes": bool(lst.get("ContentTypesEnabled")),
+    }
+    resp = tgt.post("/_api/web/lists",
+                    extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps(body))
+    if resp.status_code not in (200, 201):
+        log(f"    !!! chyba vytvareni seznamu: {resp.status_code} {resp.text[:250]}")
+        return
+    # zapni tvorbu slozek u knihoven, pokud ji ma zdroj
+    if lst["BaseType"] == 1 and lst.get("EnableFolderCreation"):
+        tgt.post(f"/_api/web/lists/getbytitle('{odata(title)}')",
+                 extra_headers=tgt.write_headers(method_override="MERGE",
+                                                 extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                 data=json.dumps({"__metadata": {"type": "SP.List"}, "EnableFolderCreation": True}))
+
+
+# ============================ PREVZETI SLOUPCU (SCHEMA) =====================
+
+FIELD_OPTIONS      = 12
+NOTE_FIELD_OPTIONS = 12
+
+def _all_source_fields_by_id(src, list_title):
+    r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+                "?$select=Id,Title,InternalName,TypeAsString,SchemaXml,Hidden,ReadOnlyField,FromBaseType")
+    r.raise_for_status()
+    return {str(f["Id"]).lower(): f for f in r.json()["d"]["results"]}
+
+def _field_exists(tgt, list_title, internal):
+    r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+                f"/getbyinternalnameortitle('{odata(internal)}')?$select=InternalName")
+    return r.status_code == 200
+
+def _create_field_from_xml(tgt, list_title, schema_xml, options):
+    body = {"parameters": {"__metadata": {"type": "SP.XmlSchemaFieldCreationInformation"},
+                           "SchemaXml": schema_xml, "Options": options}}
+    return tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields/CreateFieldAsXml",
+                    extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps(body))
+
+def _get_textfield_guid(schema_xml):
+    m = re.search(r"<Name>TextField</Name>\s*<Value[^>]*>\{?([0-9a-fA-F\-]{36})\}?</Value>", schema_xml)
+    return m.group(1).lower() if m else None
+
+def copy_list_fields(src, tgt, list_title):
+    if not COPY_SOURCE_FIELDS:
+        return
+    src_fields = get_fields(src, list_title)
+    if not src_fields:
+        return
+    all_by_id = _all_source_fields_by_id(src, list_title)
+    log(f"  Prevzeti sloupcu ze zdroje ({len(src_fields)} kandidatu):")
+    for f in src_fields:
+        internal, ftype, title = f["InternalName"], f["TypeAsString"], f["Title"]
+        if _field_exists(tgt, list_title, internal):
+            log(f"    [SLOUPEC] '{title}' ({internal}, {ftype}) - uz existuje, preskakuji")
+            continue
+        src_full = None
+        if f.get("Id"):
+            src_full = all_by_id.get(str(f["Id"]).lower())
+        if not src_full:
+            for ff in all_by_id.values():
+                if ff.get("InternalName") == internal:
+                    src_full = ff
+                    break
+        schema = src_full["SchemaXml"] if src_full else None
+        if not schema:
+            log(f"    [SLOUPEC] '{title}' - nelze precist SchemaXml, preskakuji")
+            continue
+        is_tax = ftype in ("TaxonomyFieldType", "TaxonomyFieldTypeMulti")
+        log(f"    [SLOUPEC] vytvarim '{title}' ({internal}, {ftype})" + (" [taxonomy]" if is_tax else ""))
+        if DRY_RUN:
+            continue
+        if is_tax:
+            note_guid = _get_textfield_guid(schema)
+            note_field = all_by_id.get(note_guid) if note_guid else None
+            if note_field and note_field.get("SchemaXml"):
+                if not _field_exists(tgt, list_title, note_field["InternalName"]):
+                    rn = _create_field_from_xml(tgt, list_title, note_field["SchemaXml"], NOTE_FIELD_OPTIONS)
+                    if rn.status_code not in (200, 201):
+                        log(f"        !!! chyba Note sloupce: {rn.status_code} {rn.text[:200]}")
+            else:
+                log(f"        (!) skryty Note sloupec pro '{title}' nenalezen")
+            rt = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS)
+            if rt.status_code not in (200, 201):
+                log(f"        !!! chyba taxonomy sloupce: {rt.status_code} {rt.text[:250]}")
+        else:
+            r = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS)
+            if r.status_code not in (200, 201):
+                log(f"        !!! chyba sloupce: {r.status_code} {r.text[:250]}")
+
+
+# ============================ PREVZETI VIEWS (ZOBRAZENI) ====================
+
+def copy_views(src, tgt, list_title):
+    """Prevezme zobrazeni (views) seznamu ze zdroje - vytvori chybejici na cili."""
+    if not COPY_VIEWS:
+        return
+    r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+                "?$select=Title,ViewQuery,RowLimit,DefaultView,Paged,Hidden,ViewFields,PersonalView")
+    if r.status_code != 200:
+        return
+    src_views = [v for v in r.json()["d"]["results"] if not v.get("Hidden") and not v.get("PersonalView")]
+    if not src_views:
+        return
+    # existujici views na cili
+    rt = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views?$select=Title")
+    existing = set()
+    if rt.status_code == 200:
+        existing = {v["Title"] for v in rt.json()["d"]["results"]}
+    log(f"  Prevzeti views ({len(src_views)}):")
+    for v in src_views:
+        vtitle = v["Title"]
+        if vtitle in existing:
+            log(f"    [VIEW] '{vtitle}' - uz existuje, aktualizuji dotaz")
+            if not DRY_RUN:
+                _update_view(tgt, list_title, vtitle, v)
+            continue
+        log(f"    [VIEW] vytvarim '{vtitle}'" + (" (vychozi)" if v.get("DefaultView") else ""))
+        if DRY_RUN:
+            continue
+        body = {"__metadata": {"type": "SP.View"},
+                "Title": vtitle,
+                "ViewQuery": v.get("ViewQuery", "") or "",
+                "RowLimit": v.get("RowLimit", 30),
+                "Paged": bool(v.get("Paged", True)),
+                "PersonalView": False}
+        resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views",
+                        extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                        data=json.dumps(body))
+        if resp.status_code not in (200, 201):
+            log(f"        !!! chyba vytvareni view: {resp.status_code} {resp.text[:200]}")
+            continue
+        # nastav ViewFields (sloupce ve view)
+        vf = (v.get("ViewFields") or {}).get("Items", {}).get("results", [])
+        if vf:
+            _set_view_fields(tgt, list_title, vtitle, vf)
+
+def _update_view(tgt, list_title, vtitle, v):
+    body = {"__metadata": {"type": "SP.View"},
+            "ViewQuery": v.get("ViewQuery", "") or "",
+            "RowLimit": v.get("RowLimit", 30)}
+    tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views/getbytitle('{odata(vtitle)}')",
+             extra_headers=tgt.write_headers(method_override="MERGE",
+                                             extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+             data=json.dumps(body))
+
+def _set_view_fields(tgt, list_title, vtitle, fields):
+    base = (f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+            f"/getbytitle('{odata(vtitle)}')/viewfields")
+    tgt.post(base + "/removeallviewfields", extra_headers=tgt.write_headers())
+    for fn in fields:
+        tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
+
+
+# ============================ NAVIGACE (Quick Launch + horni menu) ==========
+
+def _remap_url(u):
+    """Premapuje server-relative URL ze zdroje na cil (jinak necha externi)."""
+    if not u:
+        return u
+    sp = SOURCE_SITE.split(".com", 1)[1]
+    tp = TARGET_SITE.split(".com", 1)[1]
+    return u.replace(sp, tp)
+
+def _get_nav_nodes(sp, which):
+    """which = 'quicklaunch' | 'topnavigationbar'. Vrati stromovou strukturu."""
+    r = sp.get(f"/_api/web/navigation/{which}?$expand=Children")
+    if r.status_code != 200:
+        return []
+    out = []
+    for n in r.json()["d"]["results"]:
+        kids = [{"Title": c["Title"], "Url": c["Url"], "IsExternal": c.get("IsExternal", False)}
+                for c in (n.get("Children", {}).get("results", []))]
+        out.append({"Title": n["Title"], "Url": n["Url"],
+                    "IsExternal": n.get("IsExternal", False), "Children": kids})
+    return out
+
+def _clear_nav(tgt, which):
+    r = tgt.get(f"/_api/web/navigation/{which}?$select=Id")
+    if r.status_code != 200:
+        return
+    for n in r.json()["d"]["results"]:
+        tgt.post(f"/_api/web/navigation/{which}/getbyid({n['Id']})",
+                 extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
+
+def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
+    if parent_id is not None:
+        endpoint = f"/_api/web/navigation/getnodebyid({parent_id})/children"
+    else:
+        endpoint = f"/_api/web/navigation/{which}"
+    body = {"__metadata": {"type": "SP.NavigationNode"},
+            "Title": title, "Url": _remap_url(url) if not is_external else url,
+            "IsExternal": bool(is_external)}
+    r = tgt.post(endpoint,
+                 extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                 data=json.dumps(body))
+    if r.status_code in (200, 201):
+        try:
+            return r.json()["d"]["Id"]
+        except Exception:
+            return None
+    log(f"        !!! chyba pridani nav uzlu '{title}': {r.status_code} {r.text[:150]}")
+    return None
+
+def copy_navigation(src, tgt):
+    if not COPY_NAVIGATION:
+        return
+    log(f"\n{'='*70}\nNAVIGACE (Quick Launch + horni menu)\n{'='*70}")
+    for which, label in (("quicklaunch", "Quick Launch"), ("topnavigationbar", "Horni menu")):
+        nodes = _get_nav_nodes(src, which)
+        log(f"  [{label}] nalezeno {len(nodes)} uzlu na zdroji")
+        if DRY_RUN:
+            for n in nodes:
+                log(f"    - {n['Title']} ({n['Url']})")
+                for c in n["Children"]:
+                    log(f"        - {c['Title']} ({c['Url']})")
+            continue
+        _clear_nav(tgt, which)
+        for n in nodes:
+            pid = _add_nav_node(tgt, which, n["Title"], n["Url"], n["IsExternal"])
+            for c in n["Children"]:
+                _add_nav_node(tgt, which, c["Title"], c["Url"], c["IsExternal"], parent_id=pid)
+
+
+# ============================ VYPIS OBSAHU ==========
 
 def _print_folder_tree(sp, folder_url, indent=""):
     r = sp.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(folder_url)}')?$expand=Folders,Files")
@@ -266,305 +486,433 @@ def _print_folder_tree(sp, folder_url, indent=""):
         log(f"{indent}!!! nelze nacist slozku '{folder_url}': {r.status_code}")
         return
     data = r.json()["d"]
-    files = data.get("Files", {}).get("results", [])
-    folders = data.get("Folders", {}).get("results", [])
-
-    for f in files:
+    for f in data.get("Files", {}).get("results", []):
         log(f"{indent}[SOUBOR] {f['Name']}")
-
-    for sub in folders:
+    for sub in data.get("Folders", {}).get("results", []):
         name = sub["Name"]
         if name == "Forms":
             continue
         log(f"{indent}[SLOZKA] {name}/")
         _print_folder_tree(sp, f"{folder_url}/{name}", indent=indent + "    ")
 
-
 def print_list_contents(sp, lst):
     title = lst["Title"]
-    base_type = lst["BaseType"]
-
-    if base_type == 1:
+    if lst["BaseType"] == 1:
         root = lst["RootFolder"]["ServerRelativeUrl"]
         label = "stranek" if is_site_pages_library(lst) else "knihovny"
-        log(f"  Obsah {label} '{title}' (strom slozek a souboru):")
+        log(f"  Obsah {label} '{title}' (strom):")
         _print_folder_tree(sp, root, indent="    ")
     else:
         r = sp.get(f"/_api/web/lists/getbytitle('{odata(title)}')/items?$select=Id,Title&$top=5000")
         if r.status_code != 200:
-            log(f"    !!! nelze nacist polozky seznamu '{title}': {r.status_code} {r.text[:200]}")
+            log(f"    !!! nelze nacist polozky '{title}': {r.status_code}")
             return
         items = r.json()["d"]["results"]
         log(f"  Obsah seznamu '{title}' ({len(items)} polozek):")
-        if not items:
-            log(f"    (seznam je prazdny)")
         for item in items:
-            name = item.get("Title") or "(bez nazvu)"
-            log(f"    [POLOZKA] #{item['Id']:<5} {name}")
+            log(f"    [POLOZKA] #{item['Id']:<5} {item.get('Title') or '(bez nazvu)'}")
 
 
-# ============================ MAZANI OBSAHU NA CILI =========================
+# ============================ MAZANI OBSAHU =========================
 
 def clear_document_library(tgt, root_folder_url):
     r = tgt.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(root_folder_url)}')?$expand=Folders,Files")
     if r.status_code != 200:
-        log(f"    (cilova slozka zatim neexistuje nebo chyba cteni: {r.status_code})")
+        log(f"    (cilova slozka neexistuje/chyba: {r.status_code})")
         return
-
     data = r.json()["d"]
-    files = data.get("Files", {}).get("results", [])
-    folders = data.get("Folders", {}).get("results", [])
-
-    for f in files:
+    for f in data.get("Files", {}).get("results", []):
         furl = f["ServerRelativeUrl"]
         log(f"    [MAZAT SOUBOR] {furl}")
         if not DRY_RUN:
-            resp = tgt.post(
-                f"/_api/web/GetFileByServerRelativeUrl('{odata(furl)}')",
-                extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}),
-            )
+            resp = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(furl)}')",
+                            extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
             if resp.status_code not in (200, 204):
-                log(f"      !!! chyba mazani souboru: {resp.status_code} {resp.text[:200]}")
-
-    for sub in folders:
+                log(f"      !!! chyba mazani souboru: {resp.status_code}")
+    for sub in data.get("Folders", {}).get("results", []):
         surl = sub["ServerRelativeUrl"]
         if surl.rstrip("/").endswith("/Forms"):
             continue
         log(f"    [MAZAT SLOZKU] {surl}")
         if not DRY_RUN:
-            resp = tgt.post(
-                f"/_api/web/GetFolderByServerRelativeUrl('{odata(surl)}')",
-                extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}),
-            )
+            resp = tgt.post(f"/_api/web/GetFolderByServerRelativeUrl('{odata(surl)}')",
+                            extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
             if resp.status_code not in (200, 204):
-                log(f"      !!! chyba mazani slozky: {resp.status_code} {resp.text[:200]}")
-
+                log(f"      !!! chyba mazani slozky: {resp.status_code}")
 
 def clear_generic_list(tgt, list_title):
     r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items?$select=Id&$top=5000")
     if r.status_code != 200:
-        log(f"    (cilovy seznam '{list_title}' zatim neexistuje nebo chyba cteni: {r.status_code})")
+        log(f"    (cilovy seznam '{list_title}' neexistuje/chyba: {r.status_code})")
         return
-    items = r.json()["d"]["results"]
-    for item in items:
-        item_id = item["Id"]
-        log(f"    [MAZAT POLOZKU] {list_title} #{item_id}")
+    for item in r.json()["d"]["results"]:
+        iid = item["Id"]
+        log(f"    [MAZAT POLOZKU] {list_title} #{iid}")
         if not DRY_RUN:
-            resp = tgt.post(
-                f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})",
-                extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}),
-            )
+            resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({iid})",
+                            extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
             if resp.status_code not in (200, 204):
-                log(f"      !!! chyba mazani polozky: {resp.status_code} {resp.text[:200]}")
+                log(f"      !!! chyba mazani polozky: {resp.status_code}")
 
 
-# ============================ KOPIROVANI KNIHOVEN (SOUBORY) =========
+# ============================ KOPIROVANI SOUBORU =========
 
-# --- KSU: dohledani sloupce + nastaveni na slozce ------------------------
+def ensure_target_folder(tgt, folder_server_relative_url):
+    log(f"    [SLOZKA] {folder_server_relative_url}")
+    if DRY_RUN:
+        return
+    resp = tgt.post("/_api/web/folders",
+                    extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps({"__metadata": {"type": "SP.Folder"},
+                                     "ServerRelativeUrl": folder_server_relative_url}))
+    if resp.status_code not in (200, 201):
+        if "already exists" not in resp.text and resp.status_code not in (500,):
+            log(f"      !!! chyba vytvareni slozky: {resp.status_code} {resp.text[:200]}")
 
-# cache: (site, list_title) -> (internal_name, type_as_string) | (None, None)
-_ksu_field_cache = {}
-# aby se vypis sloupcu (diagnostika) udelal jen jednou na knihovnu
-_ksu_dumped = {}
-# cache GUID termu KSU: (site, list_title, internal) -> guid | None
+def _upload_small(tgt, tgt_folder_url, file_name, content):
+    endpoint = (f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_folder_url)}')"
+                f"/Files/add(url='{odata(file_name)}',overwrite=true)")
+    resp = tgt.post(endpoint, extra_headers=tgt.write_headers(), data=content)
+    if resp.status_code not in (200, 201):
+        log(f"      !!! chyba nahrani (small): {resp.status_code} {resp.text[:200]}")
+
+def _upload_large(tgt, tgt_folder_url, file_name, content):
+    create = tgt.post(f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_folder_url)}')"
+                      f"/Files/add(url='{odata(file_name)}',overwrite=true)",
+                      extra_headers=tgt.write_headers(), data=b"")
+    if create.status_code not in (200, 201):
+        log(f"      !!! chyba prazdneho souboru: {create.status_code}")
+        return
+    fu = odata(f"{tgt_folder_url}/{file_name}")
+    upload_id = str(uuid.uuid4())
+    total = len(content)
+    first = content[:CHUNK_SIZE]
+    r = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/StartUpload(uploadId=guid'{upload_id}')",
+                 extra_headers=tgt.write_headers(), data=first)
+    if r.status_code not in (200, 201):
+        log(f"      !!! StartUpload: {r.status_code}")
+        return
+    offset = len(first)
+    while offset < total:
+        chunk = content[offset:offset + CHUNK_SIZE]
+        op = "FinishUpload" if (offset + len(chunk)) >= total else "ContinueUpload"
+        r = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/{op}(uploadId=guid'{upload_id}',fileOffset={offset})",
+                     extra_headers=tgt.write_headers(), data=chunk)
+        if r.status_code not in (200, 201):
+            log(f"      !!! {op}: {r.status_code}")
+            return
+        offset += len(chunk)
+    if total <= CHUNK_SIZE:
+        tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/FinishUpload(uploadId=guid'{upload_id}',fileOffset={offset})",
+                 extra_headers=tgt.write_headers(), data=b"")
+
+def copy_file(src, tgt, src_file_url, tgt_folder_url, file_name):
+    log(f"    [SOUBOR] {file_name}  ->  {tgt_folder_url}")
+    if has_unsupported_chars(file_name):
+        log(f"      (!) PRESKAKUJI - nazev obsahuje '%' nebo '#'.")
+        return
+    if DRY_RUN:
+        return
+    r = src.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(src_file_url)}')/$value")
+    if r.status_code != 200:
+        log(f"      !!! chyba stazeni: {r.status_code}")
+        return
+    content = r.content
+    if len(content) <= SMALL_FILE_LIMIT:
+        _upload_small(tgt, tgt_folder_url, file_name, content)
+    else:
+        log(f"      (velky soubor {len(content)//1024//1024} MB -> chunked)")
+        _upload_large(tgt, tgt_folder_url, file_name, content)
+
+def copy_library_recursive(src, tgt, src_folder_url, tgt_folder_url, list_title=None):
+    r = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_folder_url)}')?$expand=Folders,Files")
+    r.raise_for_status()
+    data = r.json()["d"]
+    for f in data.get("Files", {}).get("results", []):
+        copy_file(src, tgt, f["ServerRelativeUrl"], tgt_folder_url, f["Name"])
+    for sub in data.get("Folders", {}).get("results", []):
+        name = sub["Name"]
+        if name == "Forms":
+            continue
+        new_src = f"{src_folder_url}/{name}"
+        new_tgt = f"{tgt_folder_url}/{name}"
+        ensure_target_folder(tgt, new_tgt)
+        if list_title:
+            set_folder_ksu(tgt, list_title, new_tgt)
+        copy_library_recursive(src, tgt, new_src, new_tgt, list_title)
+
+def target_root_for(src_root_url):
+    sp = SOURCE_SITE.split(".com", 1)[1]
+    tp = TARGET_SITE.split(".com", 1)[1]
+    return src_root_url.replace(sp, tp)
+
+
+# ============================ ASSET KNIHOVNY ====
+
+def copy_asset_library(src, tgt, path_suffix):
+    r = src.get("/_api/web/lists?$select=Title,BaseType,RootFolder/ServerRelativeUrl&$expand=RootFolder")
+    if r.status_code != 200:
+        log(f"  (!) nelze nacist knihovny pro '{path_suffix}': {r.status_code}")
+        return
+    src_root = None
+    for lst in r.json()["d"]["results"]:
+        root = lst["RootFolder"]["ServerRelativeUrl"]
+        if root.rstrip("/").endswith(path_suffix.strip("/")):
+            src_root = root
+            break
+    if not src_root:
+        log(f"  (i) asset '{path_suffix}' na zdroji neni - preskakuji")
+        return
+    tgt_root = target_root_for(src_root)
+    log(f"\n{'='*70}\nASSET KNIHOVNA: {path_suffix}\n{'='*70}")
+    rc = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_root)}')?$expand=Folders,Files")
+    if rc.status_code != 200:
+        log(f"  (!) nelze nacist '{src_root}': {rc.status_code}")
+        return
+    if DELETE_TARGET_CONTENT:
+        log(f"  Mazani obsahu cilove asset knihovny: {tgt_root}")
+        clear_document_library(tgt, tgt_root)
+    log(f"  Kopirovani assetu: {src_root} -> {tgt_root}")
+    copy_library_recursive(src, tgt, src_root, tgt_root, None)
+
+
+# ============================ MODERNI STRANKY =====
+
+PAGE_FIELDS_TO_COPY = ["Title", "CanvasContent1", "LayoutWebpartsContent",
+                       "Description", "PromotedState", "PageLayoutType"]
+
+def copy_site_pages_library(src, tgt, lst):
+    title = lst["Title"]
+    src_root = lst["RootFolder"]["ServerRelativeUrl"]
+    tgt_root = target_root_for(src_root)
+    if DELETE_TARGET_CONTENT:
+        log(f"  Mazani obsahu cilove knihovny stranek: {tgt_root}")
+        clear_document_library(tgt, tgt_root)
+    r = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_root)}')/Files?$select=Name,ServerRelativeUrl")
+    r.raise_for_status()
+    files = [f for f in r.json()["d"]["results"] if f["Name"].lower().endswith(".aspx")]
+    log(f"  Nalezeno {len(files)} stranek ke zkopirovani")
+    entity_type = get_entity_type_full_name(src, title)
+    for f in files:
+        name = f["Name"]
+        log(f"    [STRANKA] {name}")
+        r_item = src.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(f['ServerRelativeUrl'])}')"
+                         "/ListItemAllFields?$select=" + ",".join(PAGE_FIELDS_TO_COPY + ["BannerImageUrl"]))
+        if r_item.status_code != 200:
+            log(f"      !!! nelze nacist obsah stranky: {r_item.status_code}")
+            continue
+        item = r_item.json()["d"]
+        if DRY_RUN:
+            continue
+        tgt_file_url = f"{tgt_root}/{name}"
+        create_resp = tgt.post(f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_root)}')"
+                               f"/Files/AddTemplateFile(urlOfFile='{odata(tgt_file_url)}',templateFileType=3)",
+                               extra_headers=tgt.write_headers())
+        if create_resp.status_code not in (200, 201) and "already exists" not in create_resp.text:
+            log(f"      !!! chyba vytvareni stranky: {create_resp.status_code} {create_resp.text[:250]}")
+            continue
+        r_new = tgt.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/ListItemAllFields?$select=Id")
+        if r_new.status_code != 200:
+            log(f"      !!! nelze najit novou stranku: {r_new.status_code}")
+            continue
+        new_id = r_new.json()["d"]["Id"]
+        values = {"__metadata": {"type": entity_type}}
+        for field in PAGE_FIELDS_TO_COPY:
+            if item.get(field) is not None:
+                values[field] = item[field]
+        banner = item.get("BannerImageUrl")
+        if isinstance(banner, dict) and banner.get("Url"):
+            values["BannerImageUrl"] = {"__metadata": {"type": "SP.FieldUrlValue"},
+                                        "Url": _remap_url(banner["Url"]), "Description": banner.get("Description", "")}
+
+        def _write_page(vals):
+            return tgt.post(f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})",
+                            extra_headers=tgt.write_headers(method_override="MERGE",
+                                                            extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                            data=json.dumps(vals))
+        upd = _write_page(values)
+        if upd.status_code not in (200, 204):
+            log(f"      !!! chyba zapisu stranky: {upd.status_code} {upd.text[:300]}")
+        expected = values.get("CanvasContent1")
+        if expected:
+            for attempt in range(2):
+                chk = tgt.get(f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})?$select=CanvasContent1")
+                got = chk.json()["d"].get("CanvasContent1") if chk.status_code == 200 else None
+                if got == expected:
+                    break
+                log(f"      (i) CanvasContent1 se neulozil - opakuji ({attempt+1})")
+                _write_page({"__metadata": {"type": entity_type},
+                             "CanvasContent1": expected,
+                             "LayoutWebpartsContent": values.get("LayoutWebpartsContent", "")})
+            else:
+                log(f"      !!! CanvasContent1 se nepodarilo ulozit (znamy REST limit).")
+        tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/CheckIn(comment='Kopie',checkintype=1)",
+                 extra_headers=tgt.write_headers())
+        tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/Publish('Kopie')",
+                 extra_headers=tgt.write_headers())
+    if COPY_WELCOME_PAGE:
+        set_welcome_page(src, tgt)
+
+def set_welcome_page(src, tgt):
+    r = src.get("/_api/web/rootfolder?$select=WelcomePage")
+    if r.status_code != 200:
+        log(f"  (!) nelze precist WelcomePage zdroje: {r.status_code}")
+        return
+    welcome = r.json()["d"].get("WelcomePage")
+    if not welcome:
+        log(f"  (i) zdroj nema explicitni WelcomePage")
+        return
+    log(f"  [DOMOVSKA STRANKA] WelcomePage = '{welcome}'")
+    if DRY_RUN:
+        return
+    resp = tgt.post("/_api/web/rootfolder",
+                    extra_headers=tgt.write_headers(method_override="MERGE",
+                                                    extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps({"__metadata": {"type": "SP.Folder"}, "WelcomePage": welcome}))
+    if resp.status_code not in (200, 204):
+        log(f"    !!! chyba WelcomePage: {resp.status_code} {resp.text[:250]}")
+
+
+# ============================ GENERICKE SEZNAMY ======
+
+SKIP_FIELD_TYPES = {"User", "UserMulti", "Lookup", "LookupMulti",
+                    "TaxonomyFieldType", "TaxonomyFieldTypeMulti"}
+
+def copy_generic_list_items(src, tgt, list_title):
+    fields = get_fields(src, list_title)
+    skipped = [f["Title"] for f in fields if f["TypeAsString"] in SKIP_FIELD_TYPES]
+    if skipped:
+        log(f"    (!) Preskakuji nepodporovane sloupce: {skipped}")
+    r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items?$top=5000")
+    r.raise_for_status()
+    items = r.json()["d"]["results"]
+    log(f"    Nalezeno {len(items)} polozek ke kopirovani")
+    entity_type = get_entity_type_full_name(src, list_title)
+    for item in items:
+        values = {"__metadata": {"type": entity_type}}
+        for field in fields:
+            iname, ftype = field["InternalName"], field["TypeAsString"]
+            if ftype in SKIP_FIELD_TYPES:
+                continue
+            if item.get(iname) is not None:
+                values[iname] = item[iname]
+        log(f"    [POLOZKA] {list_title} - {values.get('Title', item.get('Id'))}")
+        if not DRY_RUN:
+            resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items",
+                            extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                            data=json.dumps(values))
+            if resp.status_code not in (200, 201):
+                log(f"      !!! chyba vytvareni polozky: {resp.status_code} {resp.text[:300]}")
+
+
+# ============================ KSU ======
+
+_ksu_fields_multi_cache = {}
 _ksu_guid_cache = {}
-# globalni reference na zdrojovou session (pro harvest GUID ze zdroje)
+_ksu_dumped = {}
 _SRC_SESSION = None
 
-# taxonomy/lookup typy, ktere pres prosty REST MERGE nastavit nejde
-_KSU_UNSUPPORTED_TYPES = {"TaxonomyFieldType", "TaxonomyFieldTypeMulti",
-                          "Lookup", "LookupMulti"}
-
-
 def dump_fields(tgt, list_title):
-    """DIAGNOSTIKA: vypise vsechny (nesystemove) sloupce knihovny - abys videl,
-    jak se KSU sloupec ve skutecnosti jmenuje."""
     r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
-                "?$select=Title,InternalName,TypeAsString,Hidden,ReadOnlyField")
+                "?$select=Title,InternalName,TypeAsString,Hidden")
     if r.status_code != 200:
-        log(f"      (!) nelze nacist sloupce '{list_title}': {r.status_code} {r.text[:200]}")
         return
-    log(f"      --- Sloupce knihovny '{list_title}' (Title | InternalName | Type) ---")
+    log(f"      --- Sloupce '{list_title}' ---")
     for f in r.json()["d"]["results"]:
         if f.get("Hidden"):
             continue
-        _hay = (f["Title"] + f["InternalName"]).lower()
-        flag = " [KSU?]" if ("ksu" in _hay or "csd" in _hay) else ""
+        hay = (f["Title"] + f["InternalName"]).lower()
+        flag = " [KSU?]" if ("ksu" in hay or "csd" in hay) else ""
         log(f"        {f['Title']:35} | {f['InternalName']:30} | {f['TypeAsString']}{flag}")
 
-
-def resolve_ksu_field(tgt, list_title):
-    """Najde interni nazev a typ KSU sloupce v cilove knihovne.
-    1) presna shoda Title/InternalName s kandidaty,
-    2) fallback: jakykoli sloupec obsahujici 'ksu' (case-insensitive)."""
-    key = (tgt.site, list_title)
-    if key in _ksu_field_cache:
-        return _ksu_field_cache[key]
-    internal, ftype = None, None
-    r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
-                "?$select=Title,InternalName,TypeAsString,Hidden")
-    if r.status_code == 200:
-        fields = [f for f in r.json()["d"]["results"] if not f.get("Hidden")]
-        # 1) presna shoda (Title NEBO InternalName) s kandidaty
-        for cand in KSU_FIELD_TITLE_CANDIDATES:
-            for f in fields:
-                if cand.strip().lower() in (f["Title"].strip().lower(),
-                                            f["InternalName"].strip().lower()):
-                    internal, ftype = f["InternalName"], f["TypeAsString"]
-                    break
-            if internal:
-                break
-        # 2) fallback: cokoli s podretezcem 'ksu' nebo 'csd'
-        if not internal:
-            for f in fields:
-                hay = (f["Title"] + f["InternalName"]).lower()
-                if "ksu" in hay or "csd" in hay:
-                    internal, ftype = f["InternalName"], f["TypeAsString"]
-                    log(f"      (i) KSU sloupec nalezen fallbackem: "
-                        f"'{f['Title']}' (InternalName '{internal}', typ {ftype})")
-                    break
-    _ksu_field_cache[key] = (internal, ftype)
-    return internal, ftype
-
-
-# cache seznamu vsech KSU sloupcu: (site, list_title) -> [(internal, ftype), ...]
-_ksu_fields_multi_cache = {}
-
-
 def resolve_ksu_fields(tgt, list_title):
-    """Vrati SEZNAM vsech KSU/CSD sloupcu (napr. 'CSD class' i 'csd').
-    Kazdy jako (internal_name, type_as_string). Bez duplicit."""
     key = (tgt.site, list_title)
     if key in _ksu_fields_multi_cache:
         return _ksu_fields_multi_cache[key]
-
-    found = []
-    seen = set()
+    found, seen = [], set()
     r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
                 "?$select=Title,InternalName,TypeAsString,Hidden")
     if r.status_code == 200:
         fields = [f for f in r.json()["d"]["results"] if not f.get("Hidden")]
-
         def _add(f):
             if f["InternalName"] not in seen:
                 seen.add(f["InternalName"])
                 found.append((f["InternalName"], f["TypeAsString"]))
-
-        # 1) presne shody s kandidaty (zachovava poradi kandidatu)
         for cand in KSU_FIELD_TITLE_CANDIDATES:
             for f in fields:
-                if cand.strip().lower() in (f["Title"].strip().lower(),
-                                            f["InternalName"].strip().lower()):
+                if cand.strip().lower() in (f["Title"].strip().lower(), f["InternalName"].strip().lower()):
                     _add(f)
-        # 2) fallback: cokoli s 'ksu' nebo 'csd' v nazvu
         for f in fields:
             hay = (f["Title"] + f["InternalName"]).lower()
             if "ksu" in hay or "csd" in hay:
                 _add(f)
-
     _ksu_fields_multi_cache[key] = found
     return found
 
-
-def _harvest_guid_from_items(sp, list_title, internal):
-    """Precte GUID termu z existujici polozky, ktera uz ma KSU = KSU_FIELD_VALUE.
-    Taxonomy sloupec vraci pri $select objekt {Label, TermGuid, WssId}."""
-    if sp is None:
-        return None
-    r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items"
-               f"?$select=Id,{internal}&$top=500")
-    if r.status_code != 200:
-        return None
-    for item in r.json()["d"]["results"]:
-        val = item.get(internal)
-        if isinstance(val, dict):
-            label = str(val.get("Label", "")).strip()
-            guid = val.get("TermGuid")
-            if guid and _label_matches(label, KSU_FIELD_VALUE):
-                return guid
-    return None
-
-
-def _termstore_get(sp, endpoint):
-    """GET na v2.1 termStore - MUSI mit Accept: application/json (ne odata=verbose)."""
-    return sp.get(endpoint, headers={"Accept": "application/json;odata=nometadata"})
-
+def _label_matches(name, target):
+    name, target = name.strip().lower(), target.strip().lower()
+    if name == target:
+        return True
+    first = name.split(" ", 1)[0].split(",", 1)[0].strip()
+    return first == target
 
 def _term_labels(t):
-    """Vytahne vsechny textove labely z term objektu (ruzne verze API)."""
     labels = t.get("labels") or []
     names = [str(l.get("name", "")).strip() for l in labels if l.get("name")]
     if not names and t.get("Name"):
         names = [str(t["Name"]).strip()]
     return names
 
+def _harvest_guid_from_items(sp, list_title, internal):
+    if sp is None:
+        return None
+    r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items?$select=Id,{internal}&$top=500")
+    if r.status_code != 200:
+        return None
+    for item in r.json()["d"]["results"]:
+        val = item.get(internal)
+        if isinstance(val, dict) and val.get("TermGuid") and _label_matches(str(val.get("Label", "")), KSU_FIELD_VALUE):
+            return val["TermGuid"]
+    return None
 
-def _label_matches(name, target):
-    """KSU labely maji tvar '5.3 PKW-Serienstandsunterlagen' -> porovnavame
-    prvni token (kod tridy) s hledanou hodnotou (napr. '5.3')."""
-    name = name.strip().lower()
-    target = target.strip().lower()
-    if name == target:
-        return True
-    # prvni "slovo" (kod pred prvni mezerou)
-    first_token = name.split(" ", 1)[0].split(",", 1)[0].strip()
-    return first_token == target
-
+def _termstore_get(sp, endpoint):
+    return sp.get(endpoint, headers={"Accept": "application/json;odata=nometadata"})
 
 def _lookup_guid_from_termstore(tgt, list_title, internal, dump=False):
-    """Dohleda GUID termu 'KSU_FIELD_VALUE' pres v2.1 term-store.
-    dump=True -> vypise vsechny termy (label + GUID) pro diagnostiku."""
-    # 1) precti TermSetId ze sloupce (tady odata=verbose zustava, je to /_api/web)
     r = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
-                f"/getbyinternalnameortitle('{odata(internal)}')"
-                "?$select=TermSetId,SspId,AnchorId")
+                f"/getbyinternalnameortitle('{odata(internal)}')?$select=TermSetId,SspId,AnchorId")
     if r.status_code != 200:
-        log(f"        (term-store) nelze precist TermSetId sloupce: {r.status_code}")
         return None
-    d = r.json()["d"]
-    term_set_id = (d.get("TermSetId") or "").strip("{}")
+    term_set_id = (r.json()["d"].get("TermSetId") or "").strip("{}")
     if not term_set_id or set(term_set_id) <= set("0-"):
-        log(f"        (term-store) sloupec nema platny TermSetId (mozna neni taxonomy).")
         return None
-    log(f"        (term-store) TermSetId = {term_set_id}")
-
     found = {"guid": None}
-
     def _walk(url, depth=0):
         while url:
             rr = _termstore_get(tgt, url)
             if rr.status_code != 200:
-                log(f"        (term-store) GET selhal ({rr.status_code}) na {url[:80]}")
                 return
             data = rr.json()
-            terms = data.get("value") or []
-            for t in terms:
+            for t in data.get("value") or []:
                 tid = t.get("id") or t.get("Id")
                 names = _term_labels(t)
                 if dump:
                     log(f"        {'  '*depth}- {', '.join(names):20} | {tid}")
-                if found["guid"] is None and any(
-                        _label_matches(n, KSU_FIELD_VALUE) for n in names):
+                if found["guid"] is None and any(_label_matches(n, KSU_FIELD_VALUE) for n in names):
                     found["guid"] = tid
                     if not dump:
                         return
-                # rekurze do potomku (hierarchie 5 -> 5.3)
                 if t.get("childrenCount", 0) and (dump or found["guid"] is None):
-                    _walk(f"/_api/v2.1/termStore/sets/{term_set_id}/terms/{tid}/children",
-                          depth + 1)
+                    _walk(f"/_api/v2.1/termStore/sets/{term_set_id}/terms/{tid}/children", depth + 1)
                     if found["guid"] and not dump:
                         return
-            # stránkování
             url = data.get("@odata.nextLink")
             if url and "/_api/" in url:
                 url = "/_api/" + url.split("/_api/", 1)[1]
-
     _walk(f"/_api/v2.1/termStore/sets/{term_set_id}/terms")
     return found["guid"]
 
-
 def get_ksu_term_guid(tgt, list_title, internal):
-    """Vrati GUID termu pro KSU_FIELD_VALUE (manual -> harvest -> term-store)."""
     if KSU_TERM_GUID:
         return KSU_TERM_GUID
     key = (tgt.site, list_title, internal)
@@ -573,42 +921,27 @@ def get_ksu_term_guid(tgt, list_title, internal):
     guid = (_harvest_guid_from_items(tgt, list_title, internal)
             or _harvest_guid_from_items(_SRC_SESSION, list_title, internal)
             or _lookup_guid_from_termstore(tgt, list_title, internal))
-    if guid:
-        log(f"      (i) GUID termu '{KSU_FIELD_VALUE}' zjisten: {guid}")
     _ksu_guid_cache[key] = guid
     return guid
 
-
 def _set_taxonomy_ksu(tgt, list_title, item_id, internal, guid):
-    """Zapise taxonomy hodnotu pres ValidateUpdateListItem (format Label|GUID)."""
     label = KSU_TERM_LABEL or KSU_FIELD_VALUE
-    body = {
-        "formValues": [{"FieldName": internal,
-                        "FieldValue": f"{label}|{guid}"}],
-        "bNewDocumentUpdate": False,
-    }
-    resp = tgt.post(
-        f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})"
-        "/ValidateUpdateListItem",
-        extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
-        data=json.dumps(body),
-    )
+    body = {"formValues": [{"FieldName": internal, "FieldValue": f"{label}|{guid}"}],
+            "bNewDocumentUpdate": False}
+    resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})/ValidateUpdateListItem",
+                    extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps(body))
     if resp.status_code not in (200, 201):
-        log(f"        !!! chyba ValidateUpdateListItem: {resp.status_code} {resp.text[:250]}")
+        log(f"        !!! ValidateUpdateListItem: {resp.status_code} {resp.text[:250]}")
         return
-    # zkontroluj HasException v odpovedi
     try:
-        results = resp.json()["d"]["ValidateUpdateListItem"]["results"]
-        for fv in results:
+        for fv in resp.json()["d"]["ValidateUpdateListItem"]["results"]:
             if fv.get("HasException"):
-                log(f"        !!! KSU zapis vratil vyjimku u pole {fv.get('FieldName')}: "
-                    f"{fv.get('ErrorMessage')}")
+                log(f"        !!! KSU vyjimka {fv.get('FieldName')}: {fv.get('ErrorMessage')}")
     except Exception:
         pass
 
-
 def _set_plain_ksu(tgt, list_title, item_id, internal, ftype):
-    """Zapise KSU na Text/Choice/Number sloupci prostym MERGE."""
     value = KSU_FIELD_VALUE
     if ftype in ("Number", "Currency"):
         try:
@@ -617,331 +950,58 @@ def _set_plain_ksu(tgt, list_title, item_id, internal, ftype):
             pass
     entity_type = get_entity_type_full_name(tgt, list_title)
     body = {"__metadata": {"type": entity_type}, internal: value}
-    resp = tgt.post(
-        f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})",
-        extra_headers=tgt.write_headers(
-            method_override="MERGE",
-            extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"},
-        ),
-        data=json.dumps(body),
-    )
+    resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})",
+                    extra_headers=tgt.write_headers(method_override="MERGE",
+                                                    extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                    data=json.dumps(body))
     if resp.status_code not in (200, 204):
-        log(f"        !!! chyba nastaveni KSU '{internal}': {resp.status_code} {resp.text[:250]}")
-
+        log(f"        !!! chyba KSU '{internal}': {resp.status_code}")
 
 def set_folder_ksu(tgt, list_title, folder_server_relative_url):
-    """Nastavi KSU tridu (KSU_FIELD_VALUE) na VSECH KSU/CSD sloupcich slozky."""
     if not SET_KSU_CLASS:
         return
-
     ksu_fields = resolve_ksu_fields(tgt, list_title)
     if not ksu_fields:
-        log(f"      (!) Zadny KSU/CSD sloupec v '{list_title}' nenalezen - preskakuji.")
         if not _ksu_dumped.get((tgt.site, list_title)):
             _ksu_dumped[(tgt.site, list_title)] = True
+            log(f"      (!) Zadny KSU/CSD sloupec v '{list_title}'")
             dump_fields(tgt, list_title)
         return
-
-    # rozdel na taxonomy vs. ostatni; pro taxonomy zjisti GUID (jednou)
     log(f"      [KSU] {folder_server_relative_url} -> {KSU_FIELD_VALUE} "
         f"(sloupce: {', '.join(i for i, _ in ksu_fields)})")
     if DRY_RUN:
         return
-
-    # najdi Id list-item polozky slozky (jednou pro vsechny sloupce)
-    r = tgt.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(folder_server_relative_url)}')"
-                "/ListItemAllFields?$select=Id")
+    r = tgt.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(folder_server_relative_url)}')/ListItemAllFields?$select=Id")
     if r.status_code != 200:
-        log(f"        !!! nelze nacist ListItem slozky: {r.status_code} {r.text[:200]}")
+        log(f"        !!! nelze nacist ListItem slozky: {r.status_code}")
         return
     item_id = r.json()["d"]["Id"]
-
     for internal, ftype in ksu_fields:
         if ftype in ("TaxonomyFieldType", "TaxonomyFieldTypeMulti"):
             guid = get_ksu_term_guid(tgt, list_title, internal)
             if not guid:
-                log(f"        (!) '{internal}' je Taxonomy, GUID '{KSU_FIELD_VALUE}' "
-                    f"neznamy - preskakuji tento sloupec.")
-                if not _ksu_dumped.get((tgt.site, "TERMS:" + list_title)):
-                    _ksu_dumped[(tgt.site, "TERMS:" + list_title)] = True
-                    _lookup_guid_from_termstore(tgt, list_title, internal, dump=True)
+                log(f"        (!) '{internal}' Taxonomy, GUID '{KSU_FIELD_VALUE}' neznamy.")
                 continue
             _set_taxonomy_ksu(tgt, list_title, item_id, internal, guid)
         else:
             _set_plain_ksu(tgt, list_title, item_id, internal, ftype)
 
 
-def ensure_target_folder(tgt, folder_server_relative_url):
-    log(f"    [SLOZKA] {folder_server_relative_url}")
-    if DRY_RUN:
-        return
-    resp = tgt.post(
-        "/_api/web/folders",
-        extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
-        data=json.dumps({"__metadata": {"type": "SP.Folder"},
-                         "ServerRelativeUrl": folder_server_relative_url}),
-    )
-    if resp.status_code not in (200, 201):
-        if "already exists" not in resp.text and resp.status_code not in (500,):
-            log(f"      !!! chyba vytvareni slozky: {resp.status_code} {resp.text[:200]}")
-
-
-def _upload_small(tgt, tgt_folder_url, file_name, content):
-    endpoint = (
-        f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_folder_url)}')"
-        f"/Files/add(url='{odata(file_name)}',overwrite=true)"
-    )
-    resp = tgt.post(endpoint, extra_headers=tgt.write_headers(), data=content)
-    if resp.status_code not in (200, 201):
-        log(f"      !!! chyba nahrani (small): {resp.status_code} {resp.text[:200]}")
-
-
-def _upload_large(tgt, tgt_folder_url, file_name, content):
-    """Chunked upload pres StartUpload/ContinueUpload/FinishUpload."""
-    # 1) vytvor prazdny soubor
-    create = tgt.post(
-        f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_folder_url)}')"
-        f"/Files/add(url='{odata(file_name)}',overwrite=true)",
-        extra_headers=tgt.write_headers(), data=b"",
-    )
-    if create.status_code not in (200, 201):
-        log(f"      !!! chyba vytvareni prazdneho souboru: {create.status_code} {create.text[:200]}")
-        return
-
-    file_url = f"{tgt_folder_url}/{file_name}"
-    fu = odata(file_url)
-    upload_id = str(uuid.uuid4())
-    total = len(content)
-
-    # 2) StartUpload s prvnim chunkem
-    first = content[:CHUNK_SIZE]
-    r = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/StartUpload(uploadId=guid'{upload_id}')",
-                 extra_headers=tgt.write_headers(), data=first)
-    if r.status_code not in (200, 201):
-        log(f"      !!! StartUpload selhal: {r.status_code} {r.text[:200]}")
-        return
-    offset = len(first)
-
-    # 3) ContinueUpload / FinishUpload
-    while offset < total:
-        chunk = content[offset:offset + CHUNK_SIZE]
-        is_last = (offset + len(chunk)) >= total
-        op = "FinishUpload" if is_last else "ContinueUpload"
-        r = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/{op}(uploadId=guid'{upload_id}',fileOffset={offset})",
-                     extra_headers=tgt.write_headers(), data=chunk)
-        if r.status_code not in (200, 201):
-            log(f"      !!! {op} selhal: {r.status_code} {r.text[:200]}")
-            return
-        offset += len(chunk)
-
-    # 4) pokud se vse veslo do prvniho chunku, je nutne jeste Finish
-    if total <= CHUNK_SIZE:
-        r = tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/FinishUpload(uploadId=guid'{upload_id}',fileOffset={offset})",
-                     extra_headers=tgt.write_headers(), data=b"")
-        if r.status_code not in (200, 201):
-            log(f"      !!! FinishUpload (single-chunk) selhal: {r.status_code} {r.text[:200]}")
-
-
-def copy_file(src, tgt, src_file_url, tgt_folder_url, file_name):
-    log(f"    [SOUBOR] {file_name}  ->  {tgt_folder_url}")
-    if has_unsupported_chars(file_name):
-        log(f"      (!) PRESKAKUJI - nazev obsahuje '%' nebo '#', ktere REST endpoint nepodporuje.")
-        return
-    if DRY_RUN:
-        return
-    r = src.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(src_file_url)}')/$value")
-    if r.status_code != 200:
-        log(f"      !!! chyba stazeni souboru: {r.status_code}")
-        return
-    content = r.content
-
-    if len(content) <= SMALL_FILE_LIMIT:
-        _upload_small(tgt, tgt_folder_url, file_name, content)
-    else:
-        log(f"      (velky soubor {len(content)//1024//1024} MB -> chunked upload)")
-        _upload_large(tgt, tgt_folder_url, file_name, content)
-
-
-def copy_library_recursive(src, tgt, src_folder_url, tgt_folder_url, list_title=None):
-    r = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_folder_url)}')?$expand=Folders,Files")
-    r.raise_for_status()
-    data = r.json()["d"]
-    files = data.get("Files", {}).get("results", [])
-    folders = data.get("Folders", {}).get("results", [])
-
-    for f in files:
-        copy_file(src, tgt, f["ServerRelativeUrl"], tgt_folder_url, f["Name"])
-
-    for sub in folders:
-        name = sub["Name"]
-        if name == "Forms":
-            continue
-        new_src = f"{src_folder_url}/{name}"
-        new_tgt = f"{tgt_folder_url}/{name}"
-        ensure_target_folder(tgt, new_tgt)
-        if list_title:
-            set_folder_ksu(tgt, list_title, new_tgt)   # <-- nastav KSU tridu na slozce
-        copy_library_recursive(src, tgt, new_src, new_tgt, list_title)
-
-
-def target_root_for(src_root_url):
-    """Premapuje server-relative cestu ze zdrojoveho webu na cilovy web."""
-    source_site_path = SOURCE_SITE.split(".com", 1)[1]
-    target_site_path = TARGET_SITE.split(".com", 1)[1]
-    return src_root_url.replace(source_site_path, target_site_path)
-
-
-# ============================ KOPIROVANI MODERNICH STRANEK (Site Pages) =====
-
-PAGE_FIELDS_TO_COPY = [
-    "Title", "CanvasContent1", "LayoutWebpartsContent",
-    "Description", "PromotedState", "PageLayoutType",
-]
-
-
-def copy_site_pages_library(src, tgt, lst):
-    title = lst["Title"]
-    src_root = lst["RootFolder"]["ServerRelativeUrl"]
-    tgt_root = target_root_for(src_root)
-
-    if DELETE_TARGET_CONTENT:
-        log(f"  Mazani obsahu cilove knihovny stranek: {tgt_root}")
-        clear_document_library(tgt, tgt_root)
-
-    r = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_root)}')/Files"
-                "?$select=Name,ServerRelativeUrl")
-    r.raise_for_status()
-    files = [f for f in r.json()["d"]["results"] if f["Name"].lower().endswith(".aspx")]
-    log(f"  Nalezeno {len(files)} stranek ke zkopirovani")
-
-    entity_type = get_entity_type_full_name(src, title)
-
-    for f in files:
-        name = f["Name"]
-        log(f"    [STRANKA] {name}")
-
-        r_item = src.get(
-            f"/_api/web/GetFileByServerRelativeUrl('{odata(f['ServerRelativeUrl'])}')"
-            "/ListItemAllFields?$select=" + ",".join(PAGE_FIELDS_TO_COPY + ["BannerImageUrl"])
-        )
-        if r_item.status_code != 200:
-            log(f"      !!! nelze nacist obsah stranky: {r_item.status_code} {r_item.text[:200]}")
-            continue
-        item = r_item.json()["d"]
-
-        if DRY_RUN:
-            continue
-
-        tgt_file_url = f"{tgt_root}/{name}"
-
-        create_resp = tgt.post(
-            f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_root)}')"
-            f"/Files/AddTemplateFile(urlOfFile='{odata(tgt_file_url)}',templateFileType=3)",
-            extra_headers=tgt.write_headers(),
-        )
-        if create_resp.status_code not in (200, 201) and "already exists" not in create_resp.text:
-            log(f"      !!! chyba vytvareni stranky: {create_resp.status_code} {create_resp.text[:250]}")
-            continue
-
-        r_new = tgt.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')"
-                        "/ListItemAllFields?$select=Id")
-        if r_new.status_code != 200:
-            log(f"      !!! nelze najit nove vytvorenou stranku na cili: {r_new.status_code}")
-            continue
-        new_id = r_new.json()["d"]["Id"]
-
-        values = {"__metadata": {"type": entity_type}}
-        for field in PAGE_FIELDS_TO_COPY:
-            val = item.get(field)
-            if val is not None:
-                values[field] = val
-
-        banner = item.get("BannerImageUrl")
-        if isinstance(banner, dict) and banner.get("Url"):
-            values["BannerImageUrl"] = {
-                "__metadata": {"type": "SP.FieldUrlValue"},
-                "Url": banner["Url"],
-                "Description": banner.get("Description", ""),
-            }
-
-        update_resp = tgt.post(
-            f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})",
-            extra_headers=tgt.write_headers(
-                method_override="MERGE",
-                extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"},
-            ),
-            data=json.dumps(values),
-        )
-        if update_resp.status_code not in (200, 204):
-            log(f"      !!! chyba zapisu obsahu stranky: {update_resp.status_code} {update_resp.text[:300]}")
-
-        tgt.post(
-            f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')"
-            "/CheckIn(comment='Kopie ze zdroje',checkintype=1)",
-            extra_headers=tgt.write_headers(),
-        )
-        tgt.post(
-            f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/Publish('Kopie ze zdroje')",
-            extra_headers=tgt.write_headers(),
-        )
-
-
-# ============================ KOPIROVANI GENERICKYCH SEZNAMU (POLOZKY) ======
-
-SKIP_FIELD_TYPES = {"User", "UserMulti", "Lookup", "LookupMulti",
-                    "TaxonomyFieldType", "TaxonomyFieldTypeMulti"}
-
-
-def copy_generic_list_items(src, tgt, list_title):
-    fields = get_fields(src, list_title)
-    skipped_fields = [f["Title"] for f in fields if f["TypeAsString"] in SKIP_FIELD_TYPES]
-    if skipped_fields:
-        log(f"    (!) Preskakuji nepodporovane sloupce (User/Lookup/Taxonomy): {skipped_fields}")
-
-    r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items?$top=5000")
-    r.raise_for_status()
-    items = r.json()["d"]["results"]
-    log(f"    Nalezeno {len(items)} polozek ke kopirovani")
-
-    entity_type = get_entity_type_full_name(src, list_title)
-
-    for item in items:
-        values = {"__metadata": {"type": entity_type}}
-        for field in fields:
-            iname = field["InternalName"]
-            ftype = field["TypeAsString"]
-            if ftype in SKIP_FIELD_TYPES:
-                continue
-            val = item.get(iname)
-            if val is None:
-                continue
-            values[iname] = val
-
-        log(f"    [POLOZKA] {list_title} - {values.get('Title', item.get('Id'))}")
-        if not DRY_RUN:
-            resp = tgt.post(
-                f"/_api/web/lists/getbytitle('{odata(list_title)}')/items",
-                extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
-                data=json.dumps(values),
-            )
-            if resp.status_code not in (200, 201):
-                log(f"      !!! chyba vytvareni polozky: {resp.status_code} {resp.text[:300]}")
-
-
 # ============================ HLAVNI BEH ====================================
 
 def main():
     log("=" * 70)
-    log(f"START kopirovani   DRY_RUN={DRY_RUN}   DELETE_TARGET_CONTENT={DELETE_TARGET_CONTENT}")
+    log(f"START   DRY_RUN={DRY_RUN}   DELETE_TARGET_CONTENT={DELETE_TARGET_CONTENT}")
+    log(f"        CREATE_MISSING_LISTS={CREATE_MISSING_LISTS}  COPY_VIEWS={COPY_VIEWS}  "
+        f"COPY_NAVIGATION={COPY_NAVIGATION}  COPY_SITE_ASSETS={COPY_SITE_ASSETS}")
     log(f"Zdroj: {SOURCE_SITE}")
     log(f"Cil:   {TARGET_SITE}")
     log("=" * 70)
 
     src = SPSession(SOURCE_SITE, SOURCE_COOKIE_FILE)
     tgt = SPSession(TARGET_SITE, TARGET_COOKIE_FILE)
-
     global _SRC_SESSION
-    _SRC_SESSION = src   # umozni harvest GUID KSU termu i ze zdroje
+    _SRC_SESSION = src
 
     for name, sp in (("ZDROJ", src), ("CIL", tgt)):
         r = sp.get("/_api/web?$select=Title")
@@ -952,49 +1012,56 @@ def main():
             return
 
     lists = get_lists(src)
-    log(f"\nNalezeno {len(lists)} seznamu/knihoven ke zpracovani:\n")
+    log(f"\nNalezeno {len(lists)} seznamu/knihoven:\n")
     for lst in lists:
-        if is_site_pages_library(lst):
-            kind = "Site Pages (moderni stranky)"
-        elif lst["BaseType"] == 1:
-            kind = "Document Library"
-        else:
-            kind = "Generic List"
-        log(f"  - {lst['Title']:30} (BaseType={lst['BaseType']}, BaseTemplate={lst['BaseTemplate']}, ItemCount={lst['ItemCount']}) [{kind}]")
+        kind = ("Site Pages" if is_site_pages_library(lst)
+                else "Document Library" if lst["BaseType"] == 1 else "Generic List")
+        log(f"  - {lst['Title']:30} (BaseType={lst['BaseType']}, ItemCount={lst['ItemCount']}) [{kind}]")
 
     if PRINT_CONTENTS:
-        log(f"\n{'='*70}")
-        log("PODROBNY VYPIS OBSAHU (co skript vidi na zdroji)")
-        log(f"{'='*70}")
+        log(f"\n{'='*70}\nPODROBNY VYPIS OBSAHU (zdroj)\n{'='*70}")
         for lst in lists:
             log(f"\n--- {lst['Title']} ---")
             print_list_contents(src, lst)
+
+    # 0) asset knihovny (obrazky/bannery) - nejdriv
+    if COPY_SITE_ASSETS:
+        copy_asset_library(src, tgt, "/SiteAssets")
+        copy_asset_library(src, tgt, "/Style Library")
 
     for lst in lists:
         title = lst["Title"]
         log(f"\n{'='*70}\nZPRACOVAVAM: {title}\n{'='*70}")
 
+        # 1) vytvor seznam na cili, pokud chybi
+        ensure_list_exists(src, tgt, lst)
+
+        # 2) prevezmi sloupce
+        copy_list_fields(src, tgt, title)
+
+        # 3) prevezmi views
+        copy_views(src, tgt, title)
+
+        # 4) obsah
         if is_site_pages_library(lst):
             copy_site_pages_library(src, tgt, lst)
-
         elif lst["BaseType"] == 1:
             src_root = lst["RootFolder"]["ServerRelativeUrl"]
             tgt_root = target_root_for(src_root)
-
             if DELETE_TARGET_CONTENT:
                 log(f"  Mazani obsahu cilove knihovny: {tgt_root}")
                 clear_document_library(tgt, tgt_root)
-
             log(f"  Kopirovani souboru: {src_root} -> {tgt_root}")
             copy_library_recursive(src, tgt, src_root, tgt_root, title)
-
         else:
             if DELETE_TARGET_CONTENT:
                 log(f"  Mazani polozek ciloveho seznamu: {title}")
                 clear_generic_list(tgt, title)
-
             log(f"  Kopirovani polozek seznamu: {title}")
             copy_generic_list_items(src, tgt, title)
+
+    # 5) navigace (Quick Launch + horni menu) - na zaver
+    copy_navigation(src, tgt)
 
     log("\n" + "=" * 70)
     log("HOTOVO" + ("  (DRY RUN - nic se nezapsalo)" if DRY_RUN else ""))
