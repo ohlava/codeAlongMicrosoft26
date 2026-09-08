@@ -40,6 +40,11 @@
 .PARAMETER SkipMetadata
     Vytvoří jen složky - metadata neřeší a sloupce nezakládá.
 
+.PARAMETER ListTerms
+    Nic nevytváří. Pro zadaný sloupec se spravovanými metadaty vypíše termíny
+    term setu, ke kterému je připojený, i s jejich GUIDy, a uloží je do
+    export/terms-<sloupec>.csv. Slouží k dohledání přesného názvu termínu.
+
 .PARAMETER UnlockReadOnlyFields
     Sloupec označený ReadOnlyField zápis tiše zahodí. S tímto přepínačem ho
     skript před zápisem odemkne a po dokončení vrátí zpět na ReadOnly - i když
@@ -62,6 +67,10 @@
 .EXAMPLE
     # 1) Nejdřív se podívat, co by se stalo
     ./src/New-FolderStructure.ps1 -SiteUrl "https://contoso.sharepoint.com/sites/Proj01" -Library "Shared Documents" -Path ./Folder_Structure.xlsx
+
+.EXAMPLE
+    # Zjistit, jaké termíny sloupec se spravovanými metadaty přijímá
+    ./src/New-FolderStructure.ps1 -SiteUrl "https://contoso.sharepoint.com/sites/Proj01" -Library "Dokumenty" -Path ./Folder_Structure.xlsx -ListTerms RevIMBCS
 
 .EXAMPLE
     # Každé složce navíc nastavit CSD na pevnou hodnotu
@@ -96,6 +105,10 @@ param(
     # a k odhalení několika sloupců se stejným displejovým názvem.
     [switch] $ListFields,
 
+    # Vypíše termíny term setu, ke kterému je zadaný sloupec připojený, a skončí.
+    # Slouží k dohledání přesného názvu nebo GUIDu termínu.
+    [string] $ListTerms = "",
+
     # Sloupce označené ReadOnlyField na dobu zápisu odemkne a na konci je vrátí
     # zpět na ReadOnly, i když zápis selže.
     [switch] $UnlockReadOnlyFields,
@@ -128,6 +141,14 @@ function Write-Step($Message) {
 function Add-StructureWarning($Message) {
     $script:Warnings += $Message
     Write-Warning $Message
+}
+
+function Write-WarningSummary {
+    if ($script:Warnings.Count -gt 0) {
+        $script:Warnings | Set-Content -Path "$OutputFolder/folder-warnings.txt" -Encoding UTF8
+        Write-Host ""
+        Write-Host "$($script:Warnings.Count) varování - podrobnosti v $OutputFolder/folder-warnings.txt" -ForegroundColor Yellow
+    }
 }
 
 function Assert-Prerequisites {
@@ -398,7 +419,7 @@ function Get-SafeInternalName($Name) {
     return $clean
 }
 
-function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath) {
+function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath, $List) {
     $converted = @{}
 
     foreach ($key in $Metadata.Keys) {
@@ -420,10 +441,27 @@ function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath) {
             Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je Sealed - mění se jen na úrovni content typu, ne tady."
         }
 
-        # Do sloupce se spravovanými metadaty nejde zapsat prostý text - PnP by
-        # jen varovalo, že termín nenašlo, a hodnotu zahodilo.
-        if ((Test-IsTaxonomyField $field) -and $Metadata[$key] -notmatch '^[0-9a-fA-F-]{36}$') {
-            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je typu $($field.Type) a přijímá jen GUID termínu, ne text '$($Metadata[$key])'. Přeskakuji ho."
+        # Sloupec se spravovanými metadaty přijímá GUID termínu. Text se proto
+        # nejdřív dohledá v term setu, ke kterému je sloupec připojený - jinak
+        # by SharePoint hodnotu jen tiše zahodil.
+        if (Test-IsTaxonomyField $field) {
+            $value = "$($Metadata[$key])"
+
+            if ($value -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+                $converted[$field.InternalName] = $value
+                continue
+            }
+
+            $settings = Get-TaxonomyFieldSettings $List $field.InternalName
+            if (-not $settings) { continue }
+
+            $termId = Resolve-TermId $settings.TermSetId $value
+            if (-not $termId) {
+                Add-StructureWarning "Metadata '$key' u '$FolderPath' přeskakuji - termín '$value' se nepodařilo přeložit."
+                continue
+            }
+
+            $converted[$field.InternalName] = if ($settings.IsMulti) { @($termId) } else { $termId }
             continue
         }
 
@@ -518,6 +556,153 @@ function Enable-FieldReadOnly($List, $FieldNames) {
             Add-StructureWarning "POZOR: sloupec '$name' se nepodařilo vrátit na ReadOnly: $($_.Exception.Message). Vraťte ho ručně."
         }
     }
+}
+
+$script:TermIndexCache = @{}
+
+# Ke kterému term setu je sloupec připojený. Čte se ze SchemaXml, protože
+# vlastnosti SspId a TermSetId nejsou na objektu Field přímo dostupné.
+function Get-TaxonomyFieldSettings($List, $InternalName) {
+    $field = Get-PnPField -List $List.Id -Identity $InternalName
+
+    try {
+        $xml = [xml]$field.SchemaXml
+    }
+    catch {
+        Add-StructureWarning "SchemaXml sloupce '$InternalName' nelze přečíst: $($_.Exception.Message)"
+        return $null
+    }
+
+    $properties = @{}
+    foreach ($node in $xml.SelectNodes("//Property")) {
+        $name = $node.SelectSingleNode("Name")
+        $value = $node.SelectSingleNode("Value")
+        if ($name -and $value) { $properties[$name.InnerText] = $value.InnerText }
+    }
+
+    if (-not $properties.ContainsKey("TermSetId")) {
+        Add-StructureWarning "U sloupce '$InternalName' se nepodařilo zjistit TermSetId."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        InternalName = $InternalName
+        SspId        = $properties["SspId"]
+        TermSetId    = $properties["TermSetId"]
+        AnchorId     = $properties["AnchorId"]
+        IsMulti      = $field.TypeAsString -eq "TaxonomyFieldTypeMulti"
+    }
+}
+
+# Term set se dohledává průchodem skupin, protože z TermSetId samotného se
+# skupina zjistit nedá a Get-PnPTerm ji potřebuje.
+function Find-TermSet($TermSetId) {
+    foreach ($group in (Get-PnPTermGroup)) {
+        try {
+            $sets = Get-PnPTermSet -TermGroup $group.Name -ErrorAction Stop
+        }
+        catch { continue }
+
+        foreach ($set in $sets) {
+            if ($set.Id.ToString() -eq $TermSetId) {
+                return [pscustomobject]@{ Group = $group.Name; Set = $set.Name; Id = $set.Id }
+            }
+        }
+    }
+    return $null
+}
+
+# Termíny term setu jako seznam s celou cestou. Používá se k dohledání GUIDu
+# podle názvu i k výpisu přes -ListTerms.
+function Get-TermList($TermSetId) {
+    if ($script:TermIndexCache.ContainsKey($TermSetId)) {
+        return $script:TermIndexCache[$TermSetId]
+    }
+
+    $located = Find-TermSet $TermSetId
+    if (-not $located) {
+        Add-StructureWarning "Term set $TermSetId se v Term Store nepodařilo najít. Máte na Term Store přístup?"
+        $script:TermIndexCache[$TermSetId] = @()
+        return @()
+    }
+
+    try {
+        $terms = Get-PnPTerm -TermGroup $located.Group -TermSet $located.Set -Recursive -ErrorAction Stop
+    }
+    catch {
+        # Starší verze PnP nemají -Recursive; pak se dostaneme aspoň k první úrovni.
+        try {
+            $terms = Get-PnPTerm -TermGroup $located.Group -TermSet $located.Set -ErrorAction Stop
+            Add-StructureWarning "Termíny se načetly bez -Recursive, vnořené termíny nemusí být vidět."
+        }
+        catch {
+            Add-StructureWarning "Termíny term setu '$($located.Set)' nelze načíst: $($_.Exception.Message)"
+            $script:TermIndexCache[$TermSetId] = @()
+            return @()
+        }
+    }
+
+    $list = foreach ($term in $terms) {
+        [pscustomobject]@{
+            Name      = $term.Name
+            Id        = $term.Id.ToString()
+            TermGroup = $located.Group
+            TermSet   = $located.Set
+        }
+    }
+
+    $script:TermIndexCache[$TermSetId] = @($list)
+    return @($list)
+}
+
+# Termín podle názvu. Vrací GUID, nebo $null a vysvětlení, proč to nešlo.
+function Resolve-TermId($TermSetId, $Label) {
+    $terms = Get-TermList $TermSetId
+    if ($terms.Count -eq 0) { return $null }
+
+    $wanted = $Label.Trim()
+    $exact = @($terms | Where-Object { $_.Name.Trim() -eq $wanted })
+
+    if ($exact.Count -eq 1) { return $exact[0].Id }
+
+    if ($exact.Count -gt 1) {
+        $ids = ($exact | ForEach-Object { $_.Id }) -join ", "
+        Add-StructureWarning "Termín '$Label' je v term setu víckrát ($ids). Předejte GUID toho správného."
+        return $null
+    }
+
+    $similar = @($terms | Where-Object { $_.Name -like "*$wanted*" -or $wanted -like "*$($_.Name)*" } |
+        Select-Object -First 5 | ForEach-Object { "'$($_.Name)'" })
+    $hint = if ($similar.Count -gt 0) { " Podobné termíny: $($similar -join ', ')." } else { "" }
+
+    Add-StructureWarning "Termín '$Label' v term setu není.$hint Seznam termínů vypíše -ListTerms <internalName>."
+    return $null
+}
+
+function Show-TermSet($List, $FieldInternalName, $OutFolder) {
+    $settings = Get-TaxonomyFieldSettings $List $FieldInternalName
+    if (-not $settings) { return }
+
+    $located = Find-TermSet $settings.TermSetId
+    Write-Host "  sloupec:   $FieldInternalName"
+    Write-Host "  TermSetId: $($settings.TermSetId)"
+    if ($located) {
+        Write-Host "  skupina:   $($located.Group)"
+        Write-Host "  term set:  $($located.Set)"
+    }
+    Write-Host ""
+
+    $terms = Get-TermList $settings.TermSetId
+    if ($terms.Count -eq 0) {
+        Write-Host "  Žádné termíny se nenačetly." -ForegroundColor Yellow
+        return
+    }
+
+    $terms | Sort-Object Name | Format-Table Name, Id -AutoSize | Out-String -Width 220 | Write-Host
+
+    $target = "$OutFolder/terms-$FieldInternalName.csv"
+    $terms | Sort-Object Name | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
+    Write-Host "  $($terms.Count) termínů, seznam v $target"
 }
 
 function Show-LibraryFields($List, $OutFolder) {
@@ -634,6 +819,13 @@ if ($ListFields) {
     return
 }
 
+if ($ListTerms) {
+    Write-Step "Termíny pro sloupec $ListTerms"
+    Show-TermSet $list $ListTerms $OutputFolder
+    Write-WarningSummary
+    return
+}
+
 if (-not $SkipMetadata) {
     Write-Step "Sloupce pro metadata"
     Set-MetadataColumns $list (Get-TargetColumns $MetadataMap $FixedMetadata)
@@ -668,13 +860,6 @@ Write-Host ""
 Write-Host "  vytvořit: $($toCreate.Count)     už existuje: $($plan.Count - $toCreate.Count)"
 Write-Host "  plán uložen do $OutputFolder/folder-plan.csv"
 
-function Write-WarningSummary {
-    if ($script:Warnings.Count -gt 0) {
-        $script:Warnings | Set-Content -Path "$OutputFolder/folder-warnings.txt" -Encoding UTF8
-        Write-Host ""
-        Write-Host "$($script:Warnings.Count) varování - podrobnosti v $OutputFolder/folder-warnings.txt" -ForegroundColor Yellow
-    }
-}
 
 if (-not $Apply) {
     Write-Step "DRY-RUN - do SharePointu se nic nezapsalo"
@@ -738,7 +923,7 @@ if (-not $SkipMetadata) {
                 continue
             }
 
-            $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path
+            $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path $list
             if ($values.Count -eq 0) { continue }
 
             try {

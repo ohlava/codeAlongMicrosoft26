@@ -154,38 +154,55 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructur
 Nic nezapisuje. Vypíše všechny sloupce s interním názvem a typem, upozorní na
 duplicitní názvy a uloží úplný seznam do `export/library-fields.csv`.
 
-### Sloupce se spravovanými metadaty
+### Sloupce se spravovanými metadaty (Term Store)
 
-Do sloupce typu **TaxonomyFieldType** (Managed Metadata) nelze zapsat prostý
-text — SharePoint hodnotu zahodí a PnP jen varuje:
+Sloupec typu **TaxonomyFieldType** neukládá text, ale odkaz na termín z Term
+Store. Zapsat do něj řetězec nejde — SharePoint hodnotu zahodí a PnP jen varuje:
 
 ```
 WARNING: Unable to find the specified term. Skipping values for field 'RevIMBCS'
 ```
 
-Takový sloupec přijímá jen **GUID termínu** z Term Store. Skript to teď pozná
-dopředu a místo tichého zahození vypíše, o co jde. GUID se dá dohledat takto:
+Skript to teď řeší sám: u sloupce se spravovanými metadaty si ze `SchemaXml`
+přečte, ke kterému **term setu** je připojený, dohledá v něm termín podle názvu
+a zapíše jeho GUID. Zadává se tedy normální název termínu:
 
 ```powershell
-Get-PnPTerm -TermGroup "<skupina>" -TermSet "<sada>" | Select-Object Name, Id
+-FixedMetadata @{ "RevIMBCS" = "5.3 Car Series and Concept Docs" }
 ```
 
-a předat místo textu:
+GUID termínu jde předat taky, pokud ho znáte — pozná se podle formátu a použije
+se přímo.
+
+#### Nejdřív si termíny vypsat
+
+Než se něco zapíše, ověřte, že termín v term setu skutečně je a jak přesně se
+jmenuje. Diagnostický režim nic nezapisuje:
 
 ```powershell
--FixedMetadata @{ "RevIMBCS" = "<guid termínu>" }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\New-FolderStructure.ps1 -SiteUrl "https://<tenant>.sharepoint.com/sites/<web>" -Library "Dokumenty" -Path .\Folder_Structure.xlsx -ListTerms RevIMBCS
 ```
 
-> Pokud je `CSD` v knihovně už založený jako **Choice**, musí `5.3 Car Series and
-> Concept Docs` být jednou z jeho možností, jinak SharePoint zápis odmítne
-> (nebo hodnotu zahodí, podle nastavení „Allow fill-in choices"). Pro sloupec
-> typu **Managed Metadata** takhle text zapsat nelze — tam by bylo potřeba
-> předat GUID termínu.
+Vypíše skupinu, term set, všechny termíny s GUIDy a uloží je do
+`export/terms-RevIMBCS.csv`. Když termín podle názvu nenajde při zápisu, napoví
+podobné názvy — překlepy a jiná varianta zápisu jsou nejčastější příčina.
 
-> Všechny tři sloupce jsou zatím typu Text. Pokud se `Responsible` (A1–A5) má
-> vybírat ze seznamu hodnot, patří tam typ Choice, a pokud jde o útvary nebo
-> osoby, patří to do Term Store, respektive na typ Person. To je otevřená otázka
-> na byznys — viz [01-otazky-pro-byznys.md](01-otazky-pro-byznys.md), blok B.
+Term set se dohledává průchodem skupin v Term Store, protože ze samotného
+`TermSetId` skupinu zjistit nelze. Vyžaduje to **právo čtení na Term Store**;
+bez něj se termíny nenačtou a skript to řekne.
+
+#### Records management
+
+Pozor, pokud je ten sloupec součástí řešení pro správu záznamů — poznáte to
+podle sousedních sloupců s prefixem `RevIM*`, `LegalHold` nebo
+`Popisek pro uchovávání informací`. Takový sloupec bývá `ReadOnly` právě proto,
+že ho má plnit jen to řešení.
+
+Odemknout ho jde přes `-UnlockReadOnlyFields`, ale je to zásah do klasifikace
+záznamů, ne do popisků projektu. **Potvrďte to předem se správcem Term Store
+nebo records managementu** a rozhodnutí si zapište do
+[decisions.md](decisions.md) — jinak se špatně dohledává, kdo klasifikaci
+přepsal a proč.
 
 ## Spuštění
 
@@ -335,7 +352,10 @@ upozorní; nastavení se vypíná ve verzování knihovny.
 | `A positional parameter cannot be found` u `-FixedMetadata` | Název sloupce s mezerou není v uvozovkách | `@{ "CSD Class" = "..." }` |
 | `Sloupec '<název>' nelze jednoznačně určit, přeskakuji ho` | Víc sloupců se stejným názvem, nebo název neexistuje | Spustit s `-ListFields` a předat interní název |
 | `Název '<X>' odpovídá N sloupcům` | Duplicitní displejové názvy v knihovně | Předat interní název toho správného |
-| `Unable to find the specified term. Skipping values for field '<X>'` | Zápis textu do sloupce se spravovanými metadaty | Předat GUID termínu, ne text — viz výše |
+| `Unable to find the specified term. Skipping values for field '<X>'` | Starší verze skriptu; textová hodnota v taxonomy sloupci | Aktuální verze termín dohledá sama, stačí předat název |
+| `Termín '<X>' v term setu není` | Jiný název termínu | `-ListTerms <sloupec>` a použít přesný název ze seznamu |
+| `Term set <guid> se v Term Store nepodařilo najít` | Chybí přístup na Term Store | Vyžádat právo čtení na Term Store |
+| `Termín '<X>' je v term setu víckrát` | Stejný název na víc místech | Předat GUID toho správného |
 | `<X> nelze určit, nový nezakládám` | Nejednoznačný název, duplikát by to zhoršil | Předat interní název |
 | `Sloupec '<X>' je ReadOnly, zápis by se zahodil` | Sloupec je uzamčený | `-UnlockReadOnlyFields`, viz výše |
 | `Sloupec '<X>' je Sealed` | Sloupec je z content typu | Změnit u content typu, ne na knihovně |
