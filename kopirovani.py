@@ -1,20 +1,16 @@
 # =========================================================================
 # Kopirovani obsahu SharePoint webu (site) - ZDROJ -> CIL
 # =========================================================================
-# VERZE v3.0 - vsechny opravy zapracovane najednou:
-#   1) WIPE_TARGET  - na zacatku smaze vse na cili, vse se vytvori znovu.
-#   2) Sloupce      - SchemaXml se cisti od vazeb na zdroj (zadny duplicate GUID).
-#   3) VZHLED (CustomFormatter) - kopiruje formatovani VIEWS i SLOUPCU
-#      (semafory, barvy radku...). OVERENO ze funguje (log: [OK] vzhled ulozen).
-#   4) STRANKY - MODERNI stranky (canvas v HTML-div formatu):
-#        - VYPUSTEN raw upload .aspx (NoScript ho blokuje -> 401)
-#        - VYPUSTEN SavePageAsDraft (chce JSON, dostal HTML -> 500)
-#        - pouziva JEN AddTemplateFile + MERGE CanvasContent1 v nativnim
-#          HTML-div formatu (to v drivejsim logu PROSLO)
-#        - remapuje URL i GUID seznamu/views uvnitr web-partu
-#        - overi, ze se canvas ulozil
-#   5) Home page - SetAsHomePage, fallback WelcomePage.
-#   6) Navigace, SiteAssets, Style Library.
+# VERZE v3.1 - vsechny opravy + REMAP URL v formatteru a hodnotach polozek:
+#   1) WIPE_TARGET, sloupce (bez duplicate GUID), views.
+#   2) VZHLED (CustomFormatter) views i sloupcu - OVERENO.
+#      NOVE: formatter se REMAPUJE zdroj->cil (obrazky/dlazdice Navigation
+#      odkazuji na SiteAssets zdroje -> jinak se v cili nenactou = rozbity styl).
+#   3) Polozky seznamu - NOVE: textove/URL hodnoty s odkazem na zdroj se
+#      remapuji zdroj->cil (napr. Navigation sloupce Background/Preview/Icon).
+#   4) MODERNI stranky - AddTemplateFile + MERGE CanvasContent1 (HTML-div),
+#      remap URL i GUID seznamu/views, overeni. Bez SavePageAsDraft/raw uploadu.
+#   5) Home page SetAsHomePage (fallback WelcomePage), navigace, assets.
 #
 # BEZPECNOST: DRY_RUN=True nic nezapisuje ani nemaze.
 # =========================================================================
@@ -36,8 +32,8 @@ TARGET_COOKIE_FILE = "target_cookies.txt"
 PROXY = "http://127.0.0.1:9001"          # <-- dopln svoji proxy (nebo None)
 proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 
-DRY_RUN = False                  # True = nic nezapisuje ani nemaze
-WIPE_TARGET = True               # True = na zacatku smaze vse na cili
+DRY_RUN = False
+WIPE_TARGET = True
 DELETE_TARGET_CONTENT = True
 PRINT_CONTENTS = True
 COPY_SOURCE_FIELDS = True
@@ -46,10 +42,11 @@ COPY_WELCOME_PAGE = True
 COPY_THEME = True
 CREATE_MISSING_LISTS = True
 COPY_VIEWS = True
-COPY_VIEW_FORMATTING = True       # NOVE: kopiruj vzhled views (CustomFormatter)
-COPY_FIELD_FORMATTING = True      # NOVE: kopiruj vzhled sloupcu (CustomFormatter)
+COPY_VIEW_FORMATTING = True
+COPY_FIELD_FORMATTING = True
 COPY_NAVIGATION = True
 COPY_FILE_METADATA = True
+REMAP_ITEM_URLS = True            # NOVE: remapuj zdroj->cil v textovych/URL hodnotach polozek
 
 SMALL_FILE_LIMIT = 2 * 1024 * 1024
 CHUNK_SIZE       = 8 * 1024 * 1024
@@ -203,6 +200,39 @@ def get_entity_type_full_name(sp, list_title):
     et = r.json()["d"]["ListItemEntityTypeFullName"] if r.status_code == 200 else "SP.Data.ListItem"
     _entity_type_cache[key] = et
     return et
+
+
+# ============================ REMAP URL (zdroj -> cil) ======================
+# (definovano brzy, pouziva se ve formatteru, polozkach i strankach)
+
+_SOURCE_WELCOME_PAGE = None
+
+def _target_home_url():
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    welcome = (_SOURCE_WELCOME_PAGE or "SitePages/Home.aspx").lstrip("/")
+    return f"{target_path}/{welcome}"
+
+def _remap_url(u):
+    if not u:
+        return u
+    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    raw = u.rstrip("/")
+    source_roots = {SOURCE_SITE.rstrip("/"), source_path}
+    if raw in source_roots:
+        return _target_home_url()
+    return u.replace(SOURCE_SITE, TARGET_SITE).replace(source_path, target_path)
+
+def _remap_in_content(text):
+    """Remapuje VSECHNY vyskyty zdrojove cesty v libovolnem textu (canvas,
+    formatter JSON, hodnoty polozek). Pokryva absolutni i server-relativni URL."""
+    if not isinstance(text, str) or not text:
+        return text
+    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    out = text.replace(SOURCE_SITE.rstrip("/"), TARGET_SITE.rstrip("/"))
+    out = out.replace(source_path, target_path)
+    return out
 
 
 # ============================ SEZNAM SEZNAMU =======================
@@ -545,51 +575,107 @@ def _get_views_with_formatter(sp, list_title):
     return [v for v in r.json()["d"]["results"]
             if not v.get("Hidden") and not v.get("PersonalView")]
 
+def _get_views_full(sp, list_title):
+    """Nacte views vc. CustomFormatter A ViewType2 (dulezite pro TILES)."""
+    r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+               "?$select=Id,Title,Hidden,PersonalView,CustomFormatter,ViewType2")
+    if r.status_code != 200:
+        return []
+    return [v for v in r.json()["d"]["results"]
+            if not v.get("Hidden") and not v.get("PersonalView")]
+
+
 def copy_view_formatting(src, tgt, list_title):
     if not COPY_VIEW_FORMATTING:
         return
-    src_views = _get_views_with_formatter(src, list_title)
+    src_views = _get_views_full(src, list_title)
     if not src_views:
         return
-    rt = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views?$select=Id,Title")
+    rt = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+                 "?$select=Id,Title,ViewType2")
     if rt.status_code != 200:
         log(f"    (!) nelze nacist cilove views pro formatovani: {rt.status_code}")
         return
-    tgt_by_title = {v["Title"]: v["Id"] for v in rt.json()["d"]["results"]}
-    n_ok = n_empty = n_err = 0
+    tgt_by_title = {v["Title"]: v for v in rt.json()["d"]["results"]}
+    n_ok = n_empty = n_err = n_tiles = 0
     log(f"  Kopiruji vzhled (CustomFormatter) views seznamu '{list_title}':")
     for v in src_views:
         vtitle = v["Title"]
         formatter = v.get("CustomFormatter")
-        if not formatter:
+        src_vt2 = v.get("ViewType2")   # napr. "TILES"
+        if not formatter and not src_vt2:
             n_empty += 1
             continue
         if vtitle not in tgt_by_title:
             log(f"    (!) view '{vtitle}' na cili neexistuje - preskakuji")
             n_err += 1
             continue
-        log(f"    [FORMAT] '{vtitle}' ({len(formatter)} znaku JSON)")
+
+        is_tiles = (src_vt2 or "").upper() == "TILES"
+        # remap URL uvnitr formatteru (kdyby obsahoval cesty na assety zdroje)
+        if formatter:
+            formatter = _remap_in_content(formatter)
+
+        tag = ""
+        if is_tiles:
+            tag = " [TILES]"
+            n_tiles += 1
+        log(f"    [FORMAT] '{vtitle}' ({len(formatter) if formatter else 0} znaku JSON){tag}")
         if DRY_RUN:
             continue
-        body = {"__metadata": {"type": "SP.View"}, "CustomFormatter": formatter}
-        r = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views/getbytitle('{odata(vtitle)}')",
-                     extra_headers=tgt.write_headers(method_override="MERGE",
-                                                     extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
-                     data=json.dumps(body))
-        if r.status_code in (200, 204):
-            chk = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
-                          f"/getbytitle('{odata(vtitle)}')?$select=CustomFormatter")
-            got = chk.json()["d"].get("CustomFormatter") if chk.status_code == 200 else None
-            if got:
-                n_ok += 1
-                log(f"        [OK] vzhled ulozen a overen")
+
+        # KROK 1: u TILES view NEJDRIV nastav ViewType2=TILES na cilovem view.
+        # Bez toho SharePoint formatter dlazdic ignoruje (drzi radkovy vzhled).
+        if is_tiles:
+            body_vt = {"__metadata": {"type": "SP.View"}, "ViewType2": "TILES"}
+            rvt = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+                           f"/getbytitle('{odata(vtitle)}')",
+                           extra_headers=tgt.write_headers(method_override="MERGE",
+                                                           extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                           data=json.dumps(body_vt))
+            if rvt.status_code in (200, 204):
+                log(f"        [TILES] ViewType2=TILES nastaveno")
+            else:
+                log(f"        (!) nelze nastavit ViewType2=TILES: {rvt.status_code} {rvt.text[:200]}")
+
+        # KROK 2: uloz formatter (u TILES view je to obsah s 'tileProps',
+        # prebirame ho 1:1 ze zdroje - je to spravna struktura pro dlazdice).
+        if formatter:
+            body = {"__metadata": {"type": "SP.View"}, "CustomFormatter": formatter}
+            r = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+                         f"/getbytitle('{odata(vtitle)}')",
+                         extra_headers=tgt.write_headers(method_override="MERGE",
+                                                         extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"}),
+                         data=json.dumps(body))
+            if r.status_code in (200, 204):
+                # overeni: precti zpet a porovnej presne
+                chk = tgt.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
+                              f"/getbytitle('{odata(vtitle)}')?$select=CustomFormatter,ViewType2")
+                if chk.status_code == 200:
+                    got = chk.json()["d"].get("CustomFormatter")
+                    got_vt2 = chk.json()["d"].get("ViewType2")
+                    if got and got.strip() == formatter.strip():
+                        n_ok += 1
+                        log(f"        [OK] formatter ulozen a IDENTICKY overen"
+                            + (f" (ViewType2={got_vt2})" if got_vt2 else ""))
+                    elif got:
+                        n_err += 1
+                        log(f"        !!! formatter ulozen ale LISI SE (len src={len(formatter)}, cil={len(got)})")
+                        log(f"            -> SharePoint u tohoto view formatter transformoval.")
+                        log(f"            -> Zkontroluj view '{vtitle}' rucne; mozna nutne nastavit dlazdice v UI.")
+                    else:
+                        n_err += 1
+                        log(f"        !!! formatter se NEULOZIL (cil prazdny)")
+                else:
+                    n_ok += 1
+                    log(f"        [OK] formatter zapsan (overeni nedostupne)")
             else:
                 n_err += 1
-                log(f"        !!! vzhled se NEULOZIL (kontroluj rucne)")
-        else:
-            n_err += 1
-            log(f"        !!! chyba zapisu vzhledu: {r.status_code} {r.text[:200]}")
-    log(f"  -> vzhled views '{list_title}': ok {n_ok}, bez formatu {n_empty}, chyb {n_err}")
+                log(f"        !!! chyba zapisu formatteru: {r.status_code} {r.text[:200]}")
+
+    log(f"  -> vzhled views '{list_title}': ok {n_ok}, bez formatu {n_empty}, chyb {n_err}"
+        + (f", dlazdice {n_tiles}" if n_tiles else ""))
+
 
 def copy_field_formatting(src, tgt, list_title):
     if not COPY_FIELD_FORMATTING:
@@ -602,7 +688,7 @@ def copy_field_formatting(src, tgt, list_title):
                   if f.get("CustomFormatter") and not f.get("Hidden")]
     if not src_fields:
         return
-    n_ok = n_err = 0
+    n_ok = n_err = n_remap = 0
     log(f"  Kopiruji vzhled (CustomFormatter) sloupcu seznamu '{list_title}':")
     for f in src_fields:
         internal = f["InternalName"]
@@ -611,7 +697,13 @@ def copy_field_formatting(src, tgt, list_title):
                      f"/getbyinternalnameortitle('{odata(internal)}')?$select=InternalName")
         if rc.status_code != 200:
             continue
-        log(f"    [FORMAT-COL] '{f['Title']}' ({internal})")
+        # remap URL uvnitr formatteru sloupce (obrazky/ikony ze zdroje)
+        remapped = _remap_in_content(formatter)
+        if remapped != formatter:
+            n_remap += 1
+        formatter = remapped
+        log(f"    [FORMAT-COL] '{f['Title']}' ({internal})"
+            + (" [URL remap]" if remapped != f["CustomFormatter"] else ""))
         if DRY_RUN:
             continue
         body = {"__metadata": {"type": "SP.Field"}, "CustomFormatter": formatter}
@@ -625,10 +717,9 @@ def copy_field_formatting(src, tgt, list_title):
         else:
             n_err += 1
             log(f"        !!! chyba: {r2.status_code} {r2.text[:200]}")
-    log(f"  -> vzhled sloupcu '{list_title}': ok {n_ok}, chyb {n_err}")
+    log(f"  -> vzhled sloupcu '{list_title}': ok {n_ok}, chyb {n_err}"
+        + (f", URL remap {n_remap}" if n_remap else ""))
 
-
-_SOURCE_WELCOME_PAGE = None
 
 # ============================ THEME ===========================
 
@@ -681,31 +772,6 @@ def copy_theme(src, tgt):
 
 
 # ============================ NAVIGACE ==========
-
-def _target_home_url():
-    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
-    welcome = (_SOURCE_WELCOME_PAGE or "SitePages/Home.aspx").lstrip("/")
-    return f"{target_path}/{welcome}"
-
-def _remap_url(u):
-    if not u:
-        return u
-    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
-    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
-    raw = u.rstrip("/")
-    source_roots = {SOURCE_SITE.rstrip("/"), source_path}
-    if raw in source_roots:
-        return _target_home_url()
-    return u.replace(SOURCE_SITE, TARGET_SITE).replace(source_path, target_path)
-
-def _remap_in_content(text):
-    if not isinstance(text, str) or not text:
-        return text
-    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
-    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
-    out = text.replace(SOURCE_SITE.rstrip("/"), TARGET_SITE.rstrip("/"))
-    out = out.replace(source_path, target_path)
-    return out
 
 def _is_system_nav_url(u):
     if not u:
@@ -1159,14 +1225,7 @@ def copy_asset_library(src, tgt, path_suffix):
     copy_library_recursive(src, tgt, src_root, tgt_root, None)
 
 
-# ============================ MODERNI STRANKY (OPRAVENO) =====
-#
-# ZDE JE KLICOVA ZMENA: stranky jsou MODERNI (canvas v HTML-div formatu).
-#   - VYPUSTEN raw upload .aspx  (NoScript blokuje -> 401)
-#   - VYPUSTEN SavePageAsDraft   (chce JSON, dostal HTML -> 500)
-#   - JEN AddTemplateFile + MERGE CanvasContent1 v nativnim HTML-div formatu
-#   - remap URL i GUID seznamu/views uvnitr web-partu
-#   - overeni ze canvas ulozen
+# ============================ MODERNI STRANKY =====
 
 _LIST_GUID_MAP = {}
 _VIEW_GUID_MAP = {}
@@ -1229,7 +1288,6 @@ def copy_site_pages_library(src, tgt, lst):
     src_root = lst["RootFolder"]["ServerRelativeUrl"]
     tgt_root = target_root_for(src_root)
 
-    # 0) mapa GUID seznamu/views (klic pro funkcni web party)
     _build_list_guid_map(src, tgt)
 
     src_home_name = None
@@ -1266,8 +1324,6 @@ def copy_site_pages_library(src, tgt, lst):
             continue
 
         tgt_file_url = f"{tgt_root}/{name}"
-
-        # 1) vytvor prazdnou MODERNI stranku (templateFileType=3)
         create_resp = tgt.post(f"/_api/web/GetFolderByServerRelativeUrl('{odata(tgt_root)}')"
                                f"/Files/AddTemplateFile(urlOfFile='{odata(tgt_file_url)}',templateFileType=3)",
                                extra_headers=tgt.write_headers())
@@ -1281,7 +1337,6 @@ def copy_site_pages_library(src, tgt, lst):
             continue
         new_id = r_new.json()["d"]["Id"]
 
-        # 2) priprav hodnoty. CanvasContent1 v PUVODNIM HTML-div formatu, jen remap.
         canvas = _process_canvas(item.get("CanvasContent1"))
         layout = _process_canvas(item.get("LayoutWebpartsContent"))
         values = {"__metadata": {"type": entity_type}}
@@ -1303,7 +1358,6 @@ def copy_site_pages_library(src, tgt, lst):
                                         "Url": _remap_url(banner["Url"]),
                                         "Description": banner.get("Description", "")}
 
-        # 3) checkout -> MERGE -> checkin -> publish (ZADNY SavePageAsDraft!)
         tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/CheckOut()",
                  extra_headers=tgt.write_headers())
         upd = tgt.post(f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})",
@@ -1318,7 +1372,6 @@ def copy_site_pages_library(src, tgt, lst):
         tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/Publish('Kopie')",
                  extra_headers=tgt.write_headers())
 
-        # 4) OVERENI, ze se canvas ulozil
         chk = tgt.get(f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})?$select=CanvasContent1")
         got = chk.json()["d"].get("CanvasContent1") if chk.status_code == 200 else None
         if not canvas:
@@ -1332,7 +1385,6 @@ def copy_site_pages_library(src, tgt, lst):
         if src_home_name and name.lower() == src_home_name:
             home_item_id, home_page_name = new_id, name
 
-    # 5) domovska stranka
     if not DRY_RUN and home_item_id is not None:
         ok = _set_as_home_page(tgt, home_item_id, home_page_name)
         if not ok and COPY_WELCOME_PAGE:
@@ -1370,6 +1422,22 @@ def set_welcome_page(src, tgt):
 SKIP_FIELD_TYPES = {"User", "UserMulti", "Lookup", "LookupMulti",
                     "TaxonomyFieldType", "TaxonomyFieldTypeMulti"}
 
+# typy poli, u kterych ma smysl remapovat URL zdroj->cil v hodnote
+_URL_REMAP_FIELD_TYPES = {"Text", "Note", "URL"}
+
+def _remap_item_value(value, ftype):
+    """Remapuje odkaz na zdroj v hodnote polozky (napr. Navigation Background/
+    Preview/Icon obsahuji cesty na obrazky SiteAssets zdroje)."""
+    if not REMAP_ITEM_URLS or value is None:
+        return value
+    if ftype == "URL" and isinstance(value, dict):
+        return {"__metadata": {"type": "SP.FieldUrlValue"},
+                "Url": _remap_in_content(value.get("Url", "")),
+                "Description": value.get("Description", "") or ""}
+    if ftype in ("Text", "Note") and isinstance(value, str):
+        return _remap_in_content(value)
+    return value
+
 def copy_generic_list_items(src, tgt, list_title):
     fields = get_data_fields(src, list_title)
     skipped = [f["Title"] for f in fields if f["TypeAsString"] in SKIP_FIELD_TYPES]
@@ -1380,6 +1448,7 @@ def copy_generic_list_items(src, tgt, list_title):
     items = r.json()["d"]["results"]
     log(f"    Nalezeno {len(items)} polozek ke kopirovani")
     entity_type = get_entity_type_full_name(tgt, list_title)
+    n_remap = 0
     for item in items:
         values = {"__metadata": {"type": entity_type}}
         for field in fields:
@@ -1387,7 +1456,13 @@ def copy_generic_list_items(src, tgt, list_title):
             if ftype in SKIP_FIELD_TYPES:
                 continue
             if item.get(iname) is not None:
-                values[iname] = item[iname]
+                val = item[iname]
+                if ftype in _URL_REMAP_FIELD_TYPES:
+                    new_val = _remap_item_value(val, ftype)
+                    if new_val != val:
+                        n_remap += 1
+                    val = new_val
+                values[iname] = val
         log(f"    [POLOZKA] {list_title} - {values.get('Title', item.get('Id'))}")
         if not DRY_RUN:
             resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/items",
@@ -1395,6 +1470,8 @@ def copy_generic_list_items(src, tgt, list_title):
                             data=json.dumps(values))
             if resp.status_code not in (200, 201):
                 log(f"      !!! chyba vytvareni polozky: {resp.status_code} {resp.text[:300]}")
+    if n_remap:
+        log(f"    -> URL remap v hodnotach: {n_remap}x zdroj->cil")
 
 
 # ============================ KSU ======
@@ -1587,7 +1664,8 @@ def main():
         f"DELETE_TARGET_CONTENT={DELETE_TARGET_CONTENT}")
     log(f"        CREATE_MISSING_LISTS={CREATE_MISSING_LISTS}  COPY_VIEWS={COPY_VIEWS}  "
         f"COPY_NAVIGATION={COPY_NAVIGATION}  COPY_SITE_ASSETS={COPY_SITE_ASSETS}  COPY_THEME={COPY_THEME}")
-    log(f"        COPY_VIEW_FORMATTING={COPY_VIEW_FORMATTING}  COPY_FIELD_FORMATTING={COPY_FIELD_FORMATTING}")
+    log(f"        COPY_VIEW_FORMATTING={COPY_VIEW_FORMATTING}  COPY_FIELD_FORMATTING={COPY_FIELD_FORMATTING}  "
+        f"REMAP_ITEM_URLS={REMAP_ITEM_URLS}")
     log(f"Zdroj: {SOURCE_SITE}")
     log(f"Cil:   {TARGET_SITE}")
     log("=" * 70)
@@ -1639,8 +1717,8 @@ def main():
         ensure_list_exists(src, tgt, lst)
         copy_list_fields(src, tgt, title)
         copy_views(src, tgt, title)
-        copy_view_formatting(src, tgt, title)     # vzhled zobrazeni
-        copy_field_formatting(src, tgt, title)    # vzhled sloupcu
+        copy_view_formatting(src, tgt, title)
+        copy_field_formatting(src, tgt, title)
 
         if is_site_pages_library(lst):
             copy_site_pages_library(src, tgt, lst)
