@@ -2,6 +2,31 @@
 
 Tento dokument je jednoduchý a je určen i pro kolegy, kteří nepracují pravidelně s Gitem nebo technickým vývojem.
 
+## První nastavení pro nového člena týmu
+
+Než začnete pracovat v Git repozitáři, nastavte si své jméno a e-mail. Tohle se dělá na vašem počítači a každý to musí udělat sám.
+
+```bash
+git config --global user.name "Vaše jméno"
+git config --global user.email "vas-email@domena.cz"
+```
+
+Proč je to důležité:
+
+- Git zapisuje autora každého commitu.
+- Každý člověk má v historii jiný podpis.
+- Pokud to nezadáte, Git může do commitů napsat neznámé nebo prázdné údaje.
+- Ve většině týmů je to potřeba pro dohledatelnost, audit a správné přiřazení změn ke konkrétní osobě.
+
+Co se stane, když to neuděláte:
+
+- commit může mít nevyplněné jméno nebo e-mail
+- jiní nebudou vědět, kdo změnu vytvořil
+- při push nebo review může být změna obtížněji identifikovatelná
+- v organizaci to může způsobit problémy s odpovědností a kontrolou změn
+
+Pokud jste na novém počítači, nastavte si to ještě před prvním commitem.
+
 ## 1. Jak pracovat s větvemi
 
 Používáme jednoduchou konvenci pojmenování větví:

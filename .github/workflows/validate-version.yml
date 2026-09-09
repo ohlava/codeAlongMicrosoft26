@@ -1,0 +1,67 @@
+name: Validate PnP template versions
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate-template-version:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Načtení obsahu repozitáře, aby workflow mělo přístup ke všem souborům v templates/.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Ověření, že každá PnP šablona ve složce templates/ má vyplněný atribut Version ve formátu SemVer X.Y.Z.
+      - name: Validate template Version attributes
+        shell: bash
+        run: |
+          set -u
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          templates_dir = Path('templates')
+
+          # Pokud složka templates/ neexistuje, workflow okamžitě selže.
+          if not templates_dir.exists():
+              print('Chyba: složka templates/ neexistuje. Přidejte PnP šablony do této složky.')
+              raise SystemExit(1)
+
+          # Vyhledáme všechny soubory šablon v adresáři templates/.
+          files = sorted(p for p in templates_dir.rglob('*') if p.is_file() and p.suffix.lower() in {'.xml', '.pnp', '.json'})
+
+          # Pokud nejsou žádné soubory, workflow selže s jasným hlášením.
+          if not files:
+              print('Chyba: ve složce templates/ nebyly nalezeny žádné soubory PnP šablon.')
+              raise SystemExit(1)
+
+          bad_files = []
+
+          # Ověření formátu SemVer X.Y.Z pro atribut Version.
+          # Příklad správné hodnoty: 1.0.0, 2.3.15, 12.99.7
+          version_pattern = re.compile(r'Version\s*=\s*["\']?(?P<version>\d+\.\d+\.\d+)["\']?', re.IGNORECASE)
+
+          for file_path in files:
+              text = file_path.read_text(encoding='utf-8', errors='ignore')
+              match = version_pattern.search(text)
+
+              if match is None:
+                  bad_files.append(f'{file_path}: Chyba: atribut Version chybí nebo není ve formátu SemVer X.Y.Z.')
+                  continue
+
+              version = match.group('version')
+              if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+                  bad_files.append(f'{file_path}: Chyba: hodnota Version "{version}" není validní SemVer ve formátu X.Y.Z.')
+
+          # Pokud je alespoň jeden soubor špatně, workflow skončí chybou s výpisem názvu souboru.
+          if bad_files:
+              print('Chyba validace PnP šablon:')
+              for item in bad_files:
+                  print(item)
+              raise SystemExit(1)
+
+          print(f'OK: validováno {len(files)} souborů PnP šablon v templates/. Všechny mají správně vyplněný atribut Version v formátu SemVer X.Y.Z.')
+          PY
