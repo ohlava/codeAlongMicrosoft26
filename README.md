@@ -198,7 +198,7 @@ WIPE_TARGET = False
 Spuštění:
 
 ```powershell
-python copy_site.py
+python kopirovani.py
 ```
 
 Očekávaný výstup:
