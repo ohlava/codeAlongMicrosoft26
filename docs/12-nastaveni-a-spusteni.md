@@ -137,6 +137,18 @@ Pokud je kandidát ten správný, vložte do konfigurace jeho **přesný název 
 GUID**. Když se nenajde nic, skript vypíše obsah term setu a uloží ho do
 `export/terms-<sloupec>.csv`.
 
+**Nejspolehlivější je GUID**, protože nezávisí na jazyce Term Store. Termín
+`5.3 Car Series and Concept Docs` se v českém prostředí zobrazuje jako
+`5.3 Schválení / povinná dokumentace pro sériový / konečný produkt` a německy
+jako `5.3 PKW-Serienstandsunterlagen` — je to jeden termín se třemi štítky.
+V konfiguraci je proto:
+
+```json
+"fixedMetadata": { "RevIMBCS": "f180d7d0-51f7-4ecb-b85b-8794451fa5fb" }
+```
+
+Anglický název funguje taky, jen v logu uvidíte český překlad.
+
 ## 1.5 Jak se CSD Class nastavuje
 
 Jsou to **tři různá místa** a každé se nastavuje jinak:

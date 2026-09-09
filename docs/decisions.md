@@ -330,4 +330,28 @@ hodnota v knihovně opravdu je. Tichý neúspěch se tak pozná hned.
 
 ---
 
+## 2026-09-09 | BIZ | CSD Class 5.3 = GUID f180d7d0-51f7-4ecb-b85b-8794451fa5fb
+
+Zdroj: výpis term setu `83f400d6-6f53-40a3-8fd2-b80b61df545c` (74 termínů)
+přes `Set-CsdClass.ps1 -ListTerms`.
+
+`5.3 Car Series and Concept Docs` je **anglický štítek** termínu, který se
+v českém Term Store zobrazuje jako
+`5.3 Schválení / povinná dokumentace pro sériový / konečný produkt`.
+Německy `5.3 PKW-Serienstandsunterlagen`. Je to jeden a tentýž termín.
+
+Číselná shoda z předchozího běhu tedy trefila správně, jen zobrazila jiný
+štítek. Odmítnutí shody podle samotného čísla přesto zůstává - v tomhle term
+setu má každé číslo jen jeden termín, ale spoléhat na to nelze.
+
+Do konfigurace se dává **GUID**, protože nezávisí na jazyce Term Store:
+
+    "fixedMetadata": { "RevIMBCS": "f180d7d0-51f7-4ecb-b85b-8794451fa5fb" }
+
+Term set je klasifikační schéma koncernu (0 až 13 plus Master data), sdílené
+napříč weby. GUID by měl platit v celém tenantu, ale při nasazení jinam se
+ověří přes `-ListTerms`.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

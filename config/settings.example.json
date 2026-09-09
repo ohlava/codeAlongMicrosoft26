@@ -15,10 +15,11 @@
   "libraries": [],
   "maxFileSizeMB": 250,
 
-  "_fixedMetadataComment": "Metadata na kazde vytvorene slozce. Klic je interni nazev sloupce. RevIMBCS je sloupec CSD Class se spravovanymi metadaty - hodnota se dohleda jako termin v Term Store.",
+  "_fixedMetadataComment": "Metadata na kazde vytvorene slozce. Klic je interni nazev sloupce. U sloupce se spravovanymi metadaty (RevIMBCS = CSD Class) se hodnota dohleda v Term Store podle nazvu, stitku v libovolnem jazyce, nebo GUIDu. GUID je nejjednoznacnejsi - nezavisi na jazyce Term Store.",
   "fixedMetadata": {
-    "RevIMBCS": "5.3 Car Series and Concept Docs"
+    "RevIMBCS": "f180d7d0-51f7-4ecb-b85b-8794451fa5fb"
   },
+  "_fixedMetadataNote": "GUID vyse je termin '5.3 Car Series and Concept Docs' (cesky '5.3 Schvaleni / povinna dokumentace pro seriovy / konecny produkt'). Overte pres -ListTerms, ze plati i ve vasem tenantu.",
 
   "_fieldTitlesComment": "Popisek sloupce v knihovne. Meni se jen v cilove knihovne, ne globalne v Term Store.",
   "fieldTitles": {

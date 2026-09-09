@@ -832,9 +832,11 @@ function Show-TermSet($List, $FieldInternalName, $OutFolder) {
     }
 
     $rows = $source.Terms | ForEach-Object {
+        $name = $_.Name
         [pscustomobject]@{
-            Name   = $_.Name
-            Labels = (@($_.Labels | Where-Object { $_ -ne $_.Name }) -join " | ")
+            Name   = $name
+            # Uvnitř Where-Object je $_ štítek, ne termín - proto $name zvlášť.
+            Labels = (@($_.Labels | Where-Object { $_ -ne $name }) -join " | ")
             Id     = $_.Id
         }
     }

@@ -165,9 +165,11 @@ if ($isTaxonomy) {
     if ($ListTerms) {
         Write-Step "Dostupné termíny"
         $terms | Sort-Object Name | ForEach-Object {
-            $other = @(Get-AllLabels $_ | Where-Object { $_ -ne $_.Name })
+            $name = $_.Name
+            # Pozor na $_ uvnitř Where-Object - tam už je to štítek, ne termín.
+            $other = @(Get-AllLabels $_ | Where-Object { $_ -ne $name })
             $suffix = if ($other.Count -gt 0) { "   [$($other -join ' | ')]" } else { "" }
-            Write-Host ("  {0,-45} {1}{2}" -f $_.Name, $_.Id, $suffix)
+            Write-Host ("  {0,-45} {1}{2}" -f $name, $_.Id, $suffix)
         }
         return
     }
