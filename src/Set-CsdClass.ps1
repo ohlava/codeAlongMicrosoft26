@@ -28,6 +28,11 @@
 .PARAMETER Value
     Hodnota. U spravovaných metadat název termínu, jeho číslo ("5.3"), nebo GUID.
 
+.PARAMETER Title
+    Popisek, pod kterým se sloupec zobrazuje v knihovně. Například "CSD Class"
+    místo výchozího "Třída KSU". Mění se jen v této knihovně, ne globálně
+    v Term Store ani u jiných webů.
+
 .PARAMETER Scope
     DefaultValue, ExistingFiles, nebo Both. Výchozí DefaultValue.
 
@@ -60,6 +65,9 @@ param(
     [Parameter(Mandatory = $true)] [string] $Field,
 
     [string] $Value = "",
+
+    # Popisek sloupce v knihovně. Změní se jen v této knihovně, ne globálně.
+    [string] $Title = "",
 
     [ValidateSet("DefaultValue", "ExistingFiles", "Both")]
     [string] $Scope = "DefaultValue",
@@ -151,22 +159,51 @@ if ($isTaxonomy) {
         return
     }
 
-    $wanted = $Value.Trim()
+    # Termíny klasifikačního schématu začínají číslem ("5.3 ..."). Číslo je
+    # stabilní, text za ním se v Term Store liší formulací nebo velikostí
+    # písmen, takže se porovnává hlavně ono.
+    function Get-TermNumber($Name) {
+        if ("$Name" -match '^\s*(\d+(?:\.\d+)*)') { return $Matches[1] }
+        return $null
+    }
+    function Get-NormalizedName($Name) { return (("$Name" -replace '\s+', ' ').Trim()) }
 
-    $term = $terms | Where-Object { $_.Id.ToString() -eq $wanted } | Select-Object -First 1
-    if (-not $term) { $term = $terms | Where-Object { $_.Name.Trim() -eq $wanted } | Select-Object -First 1 }
-    if (-not $term) {
-        # Termíny jsou číslované, takže se dá zadat i jen to číslo.
-        $term = $terms | Where-Object {
-            if ($_.Name -match '^(\d+(?:\.\d+)*)\b') { $Matches[1] -eq $wanted } else { $false }
-        } | Select-Object -First 1
+    $wanted = Get-NormalizedName $Value
+    $wantedNumber = Get-TermNumber $wanted
+
+    $candidates = @($terms | Where-Object { $_.Id.ToString() -eq $wanted })
+
+    if ($candidates.Count -eq 0) {
+        $candidates = @($terms | Where-Object { (Get-NormalizedName $_.Name) -eq $wanted })
+    }
+    if ($candidates.Count -eq 0 -and $wantedNumber) {
+        $candidates = @($terms | Where-Object { (Get-TermNumber $_.Name) -eq $wantedNumber })
+    }
+    if ($candidates.Count -eq 0) {
+        $candidates = @($terms | Where-Object {
+            $name = Get-NormalizedName $_.Name
+            $name.StartsWith($wanted, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $wanted.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)
+        })
     }
 
-    if (-not $term) {
-        $similar = ($terms | Where-Object { $_.Name -like "*$wanted*" } |
-            Select-Object -First 8 | ForEach-Object { "  $($_.Name)" }) -join "`n"
-        $hint = if ($similar) { "`nPodobné termíny:`n$similar" } else { "`nSeznam vypíše -ListTerms." }
-        throw "Termín '$Value' v term setu není.$hint"
+    if ($candidates.Count -gt 1) {
+        $names = ($candidates | ForEach-Object { "  $($_.Name)" }) -join "`n"
+        throw "Hodnota '$Value' odpovídá víc termínům:`n$names`nPředejte GUID toho správného."
+    }
+
+    if ($candidates.Count -eq 0) {
+        $all = ($terms | Sort-Object Name | Select-Object -First 30 |
+            ForEach-Object { "  $($_.Name)" }) -join "`n"
+        $more = if ($terms.Count -gt 30) { "`n  ... a dalších $($terms.Count - 30)" } else { "" }
+        throw "Termín '$Value' v term setu není.`n`nTerm set obsahuje $($terms.Count) termínů:`n$all$more"
+    }
+
+    $term = $candidates[0]
+
+    if ((Get-NormalizedName $term.Name) -ne $wanted) {
+        Write-Host "  zadáno:   $Value" -ForegroundColor DarkGray
+        Write-Host "  nalezeno: $($term.Name)   (shoda podle čísla)" -ForegroundColor Yellow
     }
 
     Write-Host "  termín:   $($term.Name)"
@@ -176,6 +213,28 @@ elseif ($ListTerms) {
     Write-Host ""
     Write-Host "  Sloupec není typu spravovaná metadata, žádné termíny nemá." -ForegroundColor Yellow
     return
+}
+
+# ============================================================
+# Popisek sloupce
+# ============================================================
+
+if ($Title -and $target.Title -ne $Title) {
+    Write-Step "Popisek sloupce"
+    Write-Host "  '$($target.Title)' -> '$Title'"
+
+    if ($Apply) {
+        try {
+            Set-PnPField -List $list.Id -Identity $target.InternalName -Values @{ Title = $Title } -ErrorAction Stop
+            Write-Host "  přejmenováno" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "  nelze přejmenovat: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    else {
+        Write-Host "  [náhled] přejmenoval bych" -ForegroundColor Yellow
+    }
 }
 
 if (-not $Apply) {

@@ -205,4 +205,51 @@ zachovaná.
 
 ---
 
+## 2026-09-09 | TECH | Termíny se párují podle čísla na začátku názvu
+
+Zdroj: běh proti webu TESTE. Term set sloupce `RevIMBCS` má 74 termínů, ale
+`5.3 Car Series and Concept Docs` mezi nimi nebyl - text za číslem se
+v Term Store liší formulací.
+
+Pořadí hledání je teď: GUID, přesný název, **shoda čísla na začátku**, jeden
+název je začátkem druhého. Číslo je v klasifikačním schématu stabilní, text ne.
+Když se hodnota najde jinak než přesnou shodou, skript to vypíše.
+
+Předchozí implementace porovnávala číslo termínu s celým zadaným řetězcem,
+takže `5.3` proti `5.3 Car Series and Concept Docs` nikdy nesedlo.
+
+---
+
+## 2026-09-09 | TECH | Vizuál webu se skládá z několika nezávislých přenosů
+
+Zdroj: běh proti webu TESTE - stránky se přenesly, ale web nevypadal jako vzor.
+
+Zjištění:
+
+- **Barevné téma není v handleru `WebSettings`.** Nastavuje se zvlášť přes
+  `Set-PnPWebTheme`. Vlastní téma musí být registrované v tenantu.
+- **`HeaderEmphasis`, `MegaMenuEnabled` a `QuickLaunchEnabled`** také nejsou
+  ve `WebSettings` a jsou dobře vidět. Doplněno do kroku `Pages`.
+- **Vzorový web plní navigaci ze seznamu** `Navigation`, dlaždice ze seznamu
+  `Hyperlinks`. Bez `-WithData` vzniknou prázdné seznamy a stránka vypadá
+  poloprázdná. Skript na to teď upozorní.
+- **Krok `Navigation` nebyl ve výchozí sadě**, takže se levá navigace webu
+  nepřenášela. Doplněn do výchozí sady.
+
+---
+
+## 2026-09-09 | BIZ | Sloupec RevIMBCS se v knihovně popisuje jako "CSD Class"
+
+Zadal: vlastník use casu.
+
+V cílové knihovně se sloupec `RevIMBCS` zobrazuje jako `Třída KSU`. Má se
+jmenovat `CSD Class`. Řeší se v `config/settings.json`:
+
+    "fieldTitles": { "RevIMBCS": "CSD Class" }
+
+Přejmenování platí jen pro tu knihovnu - v Term Store ani na jiných webech se
+nic nemění.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

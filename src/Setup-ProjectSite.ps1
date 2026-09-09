@@ -32,8 +32,8 @@
     přenese jen jejich struktura - to je běžnější případ.
 
 .PARAMETER Steps
-    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, CsdClass.
-    Navigation a TemplateClone je potřeba vyžádat výslovně.
+    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, Navigation, CsdClass.
+    TemplateClone je potřeba vyžádat výslovně.
 
     TemplateClone spustí původní script.ps1, který naklonuje vzorový web jako
     celek. MAŽE v cíli seznamy, než je vytvoří znovu - použitelné jen na
@@ -82,7 +82,7 @@ param(
     [switch] $WithData,
 
     [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Pages", "Navigation", "CsdClass")]
-    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "CsdClass"),
+    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "Navigation", "CsdClass"),
 
     [string] $SourceSiteUrl = "",
     [string] $ConfigPath = "",
@@ -331,6 +331,11 @@ Invoke-Step "CsdClass" {
             Scope    = $scope
             ClientId = $clientId
         }
+
+        # Popisek sloupce, pod kterým ho uvidí uživatel v knihovně.
+        if ($settings.fieldTitles -and $settings.fieldTitles.$field) {
+            $arguments["Title"] = $settings.fieldTitles.$field
+        }
         if ($Apply) { $arguments["Apply"] = $true }
 
         & (Join-Path $scriptRoot "Set-CsdClass.ps1") @arguments
@@ -345,6 +350,15 @@ Invoke-Step "CsdClass" {
 # ============================================================
 
 $copyValues = if ($WithData) { "yes" } else { "no" }
+
+# Weby, jejichž navigace nebo dlaždice se plní ze seznamu, budou bez -WithData
+# vypadat prázdné - struktura seznamu vznikne, ale položky v ní ne.
+if (-not $WithData -and ($Steps -contains "Lists")) {
+    Write-Host ""
+    Write-Host " Poznámka: seznamy se přenesou bez položek. Pokud vzorový web plní" -ForegroundColor DarkGray
+    Write-Host " navigaci nebo dlaždice ze seznamu (Navigation, Hyperlinks), budou" -ForegroundColor DarkGray
+    Write-Host " v cíli prázdné. V takovém případě použijte -WithData." -ForegroundColor DarkGray
+}
 
 Invoke-Step "Lists" {
     if (-not $Apply) {

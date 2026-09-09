@@ -88,6 +88,7 @@ Vyplnit:
 | `library` | Knihovna dokumentů v cílovém webu, kde vznikne struktura složek |
 | `folderStructureFile` | Excel se strukturou složek |
 | `fixedMetadata` | Metadata na každé vytvořené složce. Klíč je **interní** název sloupce |
+| `fieldTitles` | Popisek sloupce v knihovně, např. `RevIMBCS` → `CSD Class`. Mění se jen v cílové knihovně |
 | `csdClassScope` | `DefaultValue`, `ExistingFiles`, nebo `Both` — viz 1.5 |
 | `legacyScript` | Nastavení pro volitelný krok `TemplateClone` |
 
@@ -108,8 +109,18 @@ A jaké hodnoty přijímá CSD Class:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\Set-CsdClass.ps1 -SiteUrl "<URL vzoroveho webu>" -Library "Dokumenty" -Field RevIMBCS -ListTerms
 ```
 
-Hodnota v `fixedMetadata` musí být jeden z vypsaných termínů. Stačí i jen jeho
-číslo, tedy `"5.3"`.
+Hodnota v `fixedMetadata` se hledá v tomto pořadí: GUID, přesný název, **shoda
+čísla na začátku**, začátek názvu. Termíny klasifikačního schématu začínají
+číslem a text za ním se v Term Store často liší formulací, takže
+`"5.3 Car Series and Concept Docs"` najde i termín
+`"5.3 Car series and concept documents"`. Když se to stane, skript to napíše:
+
+```
+  termín '5.3 Car Series and Concept Docs' -> '5.3 Car series and concept documents'
+```
+
+Stačí zadat i jen `"5.3"`. Když se termín nenajde vůbec, skript rovnou vypíše,
+co term set obsahuje, a uloží úplný seznam do `export/terms-<sloupec>.csv`.
 
 ## 1.5 Jak se CSD Class nastavuje
 
@@ -159,7 +170,19 @@ Tohle je ten běžný případ. Proběhne:
 2. **CsdClass** — výchozí hodnota sloupce, aby ji dostaly nově nahrané soubory
 3. **Lists** — seznamy ze vzorového webu, bez položek
 4. **Events** — kalendáře ze vzorového webu, bez položek
-5. **Pages** — stránky, webparty, obrázky, vzhled, regionální nastavení
+5. **Pages** — stránky, webparty, obrázky, barevné téma, hlavička, regionální nastavení
+6. **Navigation** — levá a horní navigace webu
+
+### Kdy je potřeba -WithData
+
+Pokud vzorový web plní navigaci nebo dlaždice na stránce **ze seznamu**
+(typicky seznamy `Navigation`, `Hyperlinks`, `Contacts`), přenesou se bez
+`-WithData` jen prázdné seznamy a stránka bude vypadat poloprázdná. Webparty na
+ní jsou, ale nemají co zobrazit.
+
+Poznají se tak, že jsou vidět v kroku `Lists` ve výpisu. Skript na to upozorní.
+
+V takovém případě spusťte s `-WithData`.
 
 ## 2.3 Varianty
 
@@ -185,10 +208,10 @@ Tohle je ten běžný případ. Proběhne:
 ... -TargetSiteUrl "<URL>" -Steps TemplateClone,Folders,CsdClass -Apply
 ```
 
-**Přenést i navigaci:**
+**Bez navigace:**
 
 ```powershell
-... -TargetSiteUrl "<URL>" -Steps Folders,Lists,Events,Pages,CsdClass,Navigation -Apply
+... -TargetSiteUrl "<URL>" -Steps Folders,Lists,Events,Pages,CsdClass -Apply
 ```
 
 ## 2.4 Přehled kroků
@@ -200,7 +223,7 @@ Tohle je ten běžný případ. Proběhne:
 | `Lists` | ano | ne | ano, chybějící doplní |
 | `Events` | ano | ne | ano, chybějící doplní |
 | `Pages` | ano | ano, vypíše stránky | **ne, přepisuje stránky** |
-| `Navigation` | ne | ano, vypíše strom | ano |
+| `Navigation` | ano | ano, vypíše strom | ano |
 | `TemplateClone` | ne | ne | **ne, maže seznamy** |
 
 Pořadí je dané a nezávisí na tom, jak se kroky vypíšou ve `-Steps`.
@@ -254,6 +277,22 @@ Skripty v `src/` se nespouštějí přímo, kromě diagnostiky v 1.4.
 | Krok skončil `CHYBA:` | Podrobnosti jsou ve výpisu nad souhrnem a v `export/` |
 
 Jeden neúspěšný krok nezastaví ostatní — zapíše se do souhrnu a pokračuje se.
+
+## Když se web nepodobá vzoru
+
+Vizuál se skládá z několika nezávislých věcí a každá se přenáší jinde:
+
+| Co je vidět | Přenáší | Když chybí |
+|-------------|---------|------------|
+| Barvy webu | krok `Pages`, `Set-PnPWebTheme` | Vlastní téma musí být registrované v tenantu (`Add-PnPTenantTheme`), jinak ho nelze nastavit |
+| Logo, popis webu | krok `Pages`, handler `WebSettings` | — |
+| Tvar hlavičky, megamenu | krok `Pages` | — |
+| Rozložení stránky, webparty | krok `Pages` | — |
+| Obrázky na stránkách | krok `Pages` | Obrázky mimo vzorový web se nepřenášejí |
+| Levá a horní navigace webu | krok `Navigation` | Hub navigace se dědí z hubu a nepřenáší se |
+| Odkazy a dlaždice plněné ze seznamu | krok `Lists` **s `-WithData`** | Bez `-WithData` zůstanou prázdné |
+
+Nejčastější příčina "vypadá to jinak" jsou poslední dva řádky.
 
 ## Co řešení nedělá
 

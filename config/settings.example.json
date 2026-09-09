@@ -13,6 +13,11 @@
     "RevIMBCS": "5.3 Car Series and Concept Docs"
   },
 
+  "_fieldTitlesComment": "Popisek sloupce v knihovne. Meni se jen v cilove knihovne, ne globalne v Term Store.",
+  "fieldTitles": {
+    "RevIMBCS": "CSD Class"
+  },
+
   "_csdClassScopeComment": "DefaultValue = jen vychozi hodnota pro nove nahravane soubory. Both = navic oznaci i soubory, ktere v knihovne uz jsou. ExistingFiles = jen ty existujici.",
   "csdClassScope": "DefaultValue",
 

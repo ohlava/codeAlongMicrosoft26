@@ -497,9 +497,6 @@ function Set-MetadataColumns($List, $TargetColumns) {
             $color = if ($problem) { "Yellow" } else { "Gray" }
             Write-Host "  = $($target.InternalName)$note   typ $($field.Type)$flagText" -ForegroundColor $color
 
-            if (Test-IsTaxonomyField $field) {
-                Add-StructureWarning "Sloupec '$($target.InternalName)' je typu $($field.Type). Zapsat do něj text nelze - je potřeba GUID termínu."
-            }
             continue
         }
 
@@ -624,33 +621,101 @@ function Get-TermsForField($List, $InternalName) {
     return $result
 }
 
-# Termín podle názvu. Vrací objekt termínu, nebo $null a vysvětlení.
+$script:TermResolution = @{}
+
+# Termíny v klasifikačních schématech začínají číslem ("5.3 Car Series and
+# Concept Docs"). Číslo je stabilní, text za ním se v Term Store liší
+# formulací, pomlčkou nebo velikostí písmen - proto se porovnává hlavně ono.
+function Get-TermNumber($Name) {
+    if ("$Name" -match '^\s*(\d+(?:\.\d+)*)') { return $Matches[1] }
+    return $null
+}
+
+function Get-NormalizedTermName($Name) {
+    return (("$Name" -replace '\s+', ' ').Trim())
+}
+
+# Termín podle názvu, čísla, nebo GUIDu. Vrací objekt termínu, nebo $null.
+# Výsledek se pamatuje, aby stejný termín nehlásil chybu u každé složky zvlášť.
 function Resolve-Term($List, $InternalName, $Label) {
+    $cacheKey = "$InternalName|$Label"
+    if ($script:TermResolution.ContainsKey($cacheKey)) {
+        return $script:TermResolution[$cacheKey]
+    }
+
+    $script:TermResolution[$cacheKey] = $null
+
     $source = Get-TermsForField $List $InternalName
     if ($source.Terms.Count -eq 0) { return $null }
 
-    $wanted = "$Label".Trim()
+    $wanted = Get-NormalizedTermName $Label
+    $wantedNumber = Get-TermNumber $wanted
 
-    $exact = @($source.Terms | Where-Object { $_.Name.Trim() -eq $wanted })
-    if ($exact.Count -eq 1) { return $exact[0] }
-    if ($exact.Count -gt 1) {
-        Add-StructureWarning "Termín '$Label' je v term setu víckrát. Předejte GUID toho správného."
+    # 1. GUID
+    $match = @($source.Terms | Where-Object { $_.Id.ToString() -eq $wanted })
+
+    # 2. přesný název
+    if ($match.Count -eq 0) {
+        $match = @($source.Terms | Where-Object { (Get-NormalizedTermName $_.Name) -eq $wanted })
+    }
+
+    # 3. shoda čísla na začátku - "5.3" i "5.3 Cokoliv" najde termín číslo 5.3
+    if ($match.Count -eq 0 -and $wantedNumber) {
+        $match = @($source.Terms | Where-Object { (Get-TermNumber $_.Name) -eq $wantedNumber })
+    }
+
+    # 4. jeden název je začátkem druhého
+    if ($match.Count -eq 0) {
+        $match = @($source.Terms | Where-Object {
+            $name = Get-NormalizedTermName $_.Name
+            $name.StartsWith($wanted, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $wanted.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+    }
+
+    if ($match.Count -eq 1) {
+        $found = $match[0]
+        if ((Get-NormalizedTermName $found.Name) -ne $wanted) {
+            Write-Host "  termín '$Label' -> '$($found.Name)'" -ForegroundColor DarkGray
+        }
+        $script:TermResolution[$cacheKey] = $found
+        return $found
+    }
+
+    if ($match.Count -gt 1) {
+        $names = ($match | Select-Object -First 5 | ForEach-Object { "'$($_.Name)'" }) -join ", "
+        Add-StructureWarning "Termín '$Label' odpovídá víc termínům: $names. Předejte GUID toho správného."
         return $null
     }
 
-    # Termíny bývají číslované ("5.3 Car Series..."), takže se dá zadat i jen
-    # to číslo. Stejná úvaha jako v Set-CsdClass.ps1.
-    $byNumber = @($source.Terms | Where-Object {
-        if ($_.Name -match '^(\d+(?:\.\d+)*)\b') { $Matches[1] -eq $wanted } else { $false }
-    })
-    if ($byNumber.Count -eq 1) { return $byNumber[0] }
-
-    $similar = @($source.Terms | Where-Object { $_.Name -like "*$wanted*" } |
-        Select-Object -First 5 | ForEach-Object { "'$($_.Name)'" })
-    $hint = if ($similar.Count -gt 0) { " Podobné: $($similar -join ', ')." } else { "" }
-
-    Add-StructureWarning "Termín '$Label' v term setu není.$hint Seznam vypíše -ListTerms $InternalName."
+    # Nenašlo se - vypsat, co term set obsahuje, ať se to nemusí hledat jinde.
+    Add-StructureWarning "Termín '$Label' v term setu není."
+    Show-AvailableTerms $source.Terms $InternalName
     return $null
+}
+
+function Show-AvailableTerms($Terms, $InternalName) {
+    Write-Host ""
+    Write-Host "  Term set sloupce $InternalName obsahuje $($Terms.Count) termínů:" -ForegroundColor Yellow
+
+    $sorted = @($Terms | Sort-Object Name)
+    foreach ($term in ($sorted | Select-Object -First 30)) {
+        Write-Host "    $($term.Name)" -ForegroundColor DarkGray
+    }
+    if ($sorted.Count -gt 30) {
+        Write-Host "    ... a dalších $($sorted.Count - 30)" -ForegroundColor DarkGray
+    }
+
+    try {
+        $target = "$OutputFolder/terms-$InternalName.csv"
+        $sorted | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Id = $_.Id.ToString() } } |
+            Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
+        Write-Host "  Úplný seznam v $target" -ForegroundColor Yellow
+    }
+    catch {
+        Write-Verbose "Seznam termínů nelze uložit: $($_.Exception.Message)"
+    }
+    Write-Host ""
 }
 
 # Zápis do sloupce se spravovanými metadaty přes CSOM. Set-PnPListItem tady

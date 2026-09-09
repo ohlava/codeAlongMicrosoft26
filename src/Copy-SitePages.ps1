@@ -312,6 +312,8 @@ if ($Steps -contains "HomePage") {
 if ($Steps -contains "Design") {
     Write-Step "Přenáším vzhled webu"
 
+    # WebSettings nese logo, popis a pár vlastností webu, ale NENESE barevné
+    # téma moderního webu - to se nastavuje zvlášť přes Set-PnPWebTheme.
     $designPath = Join-Path $workFolder "websettings.xml"
     try {
         Get-PnPSiteTemplate -Out $designPath -Handlers WebSettings -Force -Connection $sourceConnection -ErrorAction Stop
@@ -319,19 +321,65 @@ if ($Steps -contains "Design") {
         Write-Host "  WebSettings přeneseny" -ForegroundColor Green
     }
     catch {
-        Add-PageWarning "Vzhled webu nelze přenést: $($_.Exception.Message)"
+        Add-PageWarning "WebSettings nelze přenést: $($_.Exception.Message)"
     }
 
+    # Barevné téma. Tohle je ta část, která rozhoduje o barvách webu.
     try {
-        $web = Get-PnPWeb -Connection $sourceConnection
-        $headerLayout = Get-PnPProperty -ClientObject $web -Property HeaderLayout -Connection $sourceConnection
-        if ($headerLayout) {
-            Set-PnPWeb -HeaderLayout $headerLayout -Connection $targetConnection -ErrorAction Stop
-            Write-Host "  HeaderLayout: $headerLayout" -ForegroundColor Green
+        $theme = Get-PnPWebTheme -Connection $sourceConnection -ErrorAction Stop
+
+        if ($theme -and $theme.Name) {
+            Set-PnPWebTheme -Theme $theme.Name -Connection $targetConnection -ErrorAction Stop
+            Write-Host "  téma: $($theme.Name)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  téma: vzor nemá pojmenované téma, přeskakuji" -ForegroundColor DarkGray
         }
     }
     catch {
-        Add-PageWarning "HeaderLayout nelze nastavit: $($_.Exception.Message)"
+        Add-PageWarning "Téma nelze přenést: $($_.Exception.Message). Vlastní téma musí být v tenantu registrované (Add-PnPTenantTheme), jinak ho na cílovém webu nastavit nelze."
+    }
+
+    # Hlavička, megamenu a levá navigace - další věci, které jsou vidět na
+    # první pohled a WebSettings je nenese. Každá zvlášť, aby jedna
+    # nepodporovaná vlastnost neshodila ostatní.
+    $sourceWeb = $null
+    try {
+        $sourceWeb = Get-PnPWeb -Connection $sourceConnection `
+            -Includes HeaderLayout, HeaderEmphasis, MegaMenuEnabled, QuickLaunchEnabled
+    }
+    catch {
+        Add-PageWarning "Nastavení hlavičky ze vzoru nelze přečíst: $($_.Exception.Message)"
+    }
+
+    if ($sourceWeb) {
+        if ($sourceWeb.HeaderLayout) {
+            try {
+                Set-PnPWeb -HeaderLayout $sourceWeb.HeaderLayout -Connection $targetConnection -ErrorAction Stop
+                Write-Host "  HeaderLayout: $($sourceWeb.HeaderLayout)" -ForegroundColor Green
+            }
+            catch { Add-PageWarning "HeaderLayout nelze nastavit: $($_.Exception.Message)" }
+        }
+
+        if ($sourceWeb.HeaderEmphasis) {
+            try {
+                Set-PnPWeb -HeaderEmphasis $sourceWeb.HeaderEmphasis -Connection $targetConnection -ErrorAction Stop
+                Write-Host "  HeaderEmphasis: $($sourceWeb.HeaderEmphasis)" -ForegroundColor Green
+            }
+            catch { Add-PageWarning "HeaderEmphasis nelze nastavit: $($_.Exception.Message)" }
+        }
+
+        try {
+            Set-PnPWeb -MegaMenuEnabled:([bool]$sourceWeb.MegaMenuEnabled) -Connection $targetConnection -ErrorAction Stop
+            Write-Host "  MegaMenu: $([bool]$sourceWeb.MegaMenuEnabled)" -ForegroundColor Green
+        }
+        catch { Add-PageWarning "MegaMenu nelze nastavit: $($_.Exception.Message)" }
+
+        try {
+            Set-PnPWeb -QuickLaunchEnabled:([bool]$sourceWeb.QuickLaunchEnabled) -Connection $targetConnection -ErrorAction Stop
+            Write-Host "  QuickLaunch: $([bool]$sourceWeb.QuickLaunchEnabled)" -ForegroundColor Green
+        }
+        catch { Add-PageWarning "QuickLaunch nelze nastavit: $($_.Exception.Message)" }
     }
 }
 
