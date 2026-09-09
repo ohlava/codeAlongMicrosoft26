@@ -47,7 +47,7 @@ cd C:\SharePointCopy
 Do ní zkopíruj:
 
 ```text
-copy_site.py
+kopirovani.py
 cookies.txt
 target_cookies.txt
 ```
