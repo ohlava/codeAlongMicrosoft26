@@ -68,13 +68,16 @@ $ErrorActionPreference = "Stop"
 
 $script:Warnings = @()
 
-# Knihovny, které patří SharePointu, ne projektu.
-$SystemLibraries = @(
-    "Site Assets", "Websiteobjekte", "Prostředky webu",
-    "Style Library", "Knihovna stylů",
-    "Form Templates", "Formulářové šablony",
-    "Site Pages", "Websiteseiten", "Stránky webu",
-    "Documents", "Dokumente", "Dokumenty", "Shared Documents"
+# Knihovny, které patří SharePointu, ne projektu. Poznají se podle cesty,
+# protože názvy jsou lokalizované - "Form Templates" je česky "Šablony
+# formulářů" a filtr podle názvu je proto minul.
+$SystemLibraryPaths = @(
+    "/FormServerTemplates",
+    "/SiteAssets",
+    "/SitePages",
+    "/Style Library",
+    "/_catalogs",
+    "/Lists"
 )
 
 function Write-Step($Message) {
@@ -171,15 +174,17 @@ if ($Libraries.Count -gt 0) {
     $sourceLibraries = @($sourceLibraries | Where-Object { $Libraries -contains $_.Title })
 }
 else {
-    $sourceLibraries = @($sourceLibraries | Where-Object { $SystemLibraries -notcontains $_.Title })
+    $sourceLibraries = @($sourceLibraries | Where-Object {
+        $path = $_.RootFolder.ServerRelativeUrl
+        -not ($SystemLibraryPaths | Where-Object { $path -like "*$_*" })
+    })
 }
 
 if ($sourceLibraries.Count -eq 0) {
     Write-Host "  žádné knihovny ke kopírování"
     Write-Host ""
-    Write-Host "  Výchozí filtr vynechává systémové knihovny i výchozí 'Dokumenty' -" -ForegroundColor DarkGray
-    Write-Host "  ta se plní ze struktury v Excelu. Konkrétní knihovnu si vyžádejte" -ForegroundColor DarkGray
-    Write-Host "  parametrem -Libraries \"Dokumenty\"." -ForegroundColor DarkGray
+    Write-Host "  Vynechávají se jen systémové knihovny podle cesty." -ForegroundColor DarkGray
+    Write-Host "  Konkrétní knihovnu si vyžádejte parametrem -Libraries." -ForegroundColor DarkGray
     return
 }
 
@@ -233,6 +238,11 @@ $failed = 0
 
 foreach ($entry in $plan) {
     $library = $entry.Library
+
+    if ($entry.Content.Files.Count -eq 0 -and $entry.Content.Folders.Count -eq 0) {
+        continue
+    }
+
     Write-Step "Knihovna: $($library.Title)"
 
     $sourceRoot = $library.RootFolder.ServerRelativeUrl
@@ -241,9 +251,19 @@ foreach ($entry in $plan) {
     # Cílová knihovna musí existovat. Zakládá se, pokud chybí - to je přidání,
     # ne přepis, takže je to v pořádku i při opakovaném běhu.
     $targetLibrary = Get-PnPList -Identity $library.Title -Connection $targetConnection -ErrorAction SilentlyContinue
+
     if (-not $targetLibrary) {
-        $targetLibrary = New-PnPList -Title $library.Title -Template DocumentLibrary -Connection $targetConnection
+        New-PnPList -Title $library.Title -Template DocumentLibrary -Connection $targetConnection | Out-Null
+
+        # Znovu načíst - objekt z New-PnPList nemá naplněné Id ani RootFolder.
+        $targetLibrary = Get-PnPList -Identity $library.Title -Includes RootFolder `
+            -Connection $targetConnection -ErrorAction SilentlyContinue
         Write-Host "  knihovna vytvořena" -ForegroundColor Green
+    }
+
+    if (-not $targetLibrary -or -not $targetLibrary.Id) {
+        Add-FileWarning "Cílovou knihovnu '$($library.Title)' se nepodařilo připravit, přeskakuji ji."
+        continue
     }
 
     # Složky nejdřív, od nejkratší cesty, ať existují dřív než soubory v nich.

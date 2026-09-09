@@ -345,8 +345,18 @@ if ($Steps -contains "Design") {
         if ($reader) {
             try {
                 $sourceTheme = & $reader -Connection $sourceConnection -ErrorAction Stop
-                if ($sourceTheme) {
-                    $themeName = if ($sourceTheme.Name) { $sourceTheme.Name } else { "$sourceTheme" }
+
+                # Cmdlet vrací objekt; když v něm název není, nemá smysl brát
+                # jeho ToString() - to je jen jméno typu.
+                foreach ($property in @("Name", "Theme", "ThemeName")) {
+                    if ($sourceTheme.$property -and "$($sourceTheme.$property)" -notlike "PnP.*") {
+                        $themeName = "$($sourceTheme.$property)"
+                        break
+                    }
+                }
+
+                if (-not $themeName) {
+                    Add-PageWarning "Motiv vzoru se načetl, ale nemá pojmenovaný motiv (je to vlastní nastavení barev). Zjistěte název v cílovém webu a předejte ho jako -ThemeName, nebo klíčem themeName v konfiguraci."
                 }
             }
             catch {
@@ -365,7 +375,13 @@ if ($Steps -contains "Design") {
                 Write-Host "  téma: $themeName" -ForegroundColor Green
             }
             catch {
-                Add-PageWarning "Téma '$themeName' nelze nastavit: $($_.Exception.Message). Vlastní téma musí být registrované v tenantu (Add-PnPTenantTheme)."
+                $detail = $_.Exception.Message
+                $hint = if ($detail -like "*unauthorized*") {
+                    "Na nastavení motivu nemáte oprávnění - potřebujete být vlastníkem webu."
+                } else {
+                    "Vlastní motiv musí být registrovaný v tenantu (Add-PnPTenantTheme)."
+                }
+                Add-PageWarning "Motiv '$themeName' nelze nastavit: $detail $hint"
             }
         }
         else {

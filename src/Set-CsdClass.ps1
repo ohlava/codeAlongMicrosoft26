@@ -251,8 +251,9 @@ Pokud je to ten správný, vložte do konfigurace jeho přesný název nebo GUID
     $term = $candidates[0]
 
     if ((Get-NormalizedName $term.Name) -ne $wanted) {
+        $how = if ($term.Id.ToString() -eq $wanted) { "podle GUIDu" } else { "podle názvu nebo štítku" }
         Write-Host "  zadáno:   $Value" -ForegroundColor DarkGray
-        Write-Host "  nalezeno: $($term.Name)   (shoda podle čísla)" -ForegroundColor Yellow
+        Write-Host "  nalezeno: $($term.Name)   ($how)" -ForegroundColor DarkGray
     }
 
     Write-Host "  termín:   $($term.Name)"
@@ -324,6 +325,19 @@ if ($Scope -ne "ExistingFiles") {
         Write-Host "  Nastavte výchozí hodnotu ručně: knihovna -> Nastavení -> Výchozí hodnoty sloupců." -ForegroundColor DarkGray
     }
     else {
+        # Na zamčeném sloupci výchozí hodnotu nastavit nejde, proto stejné
+        # odemčení jako u zápisu hodnot.
+        $unlocked = $false
+        if ($target.ReadOnlyField) {
+            try {
+                Set-PnPField -List $list.Id -Identity $target.InternalName -Values @{ ReadOnlyField = $false } -ErrorAction Stop | Out-Null
+                $unlocked = $true
+            }
+            catch {
+                Write-Host "  sloupec nelze odemknout: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
         try {
             & $cmdlet -List $list.Id -Field $target.InternalName -Value $defaultValue -ErrorAction Stop
             Write-Host "  nastaveno: $defaultValue" -ForegroundColor Green
@@ -331,6 +345,18 @@ if ($Scope -ne "ExistingFiles") {
         }
         catch {
             Write-Host "  nelze nastavit ($cmdlet): $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  U sloupce se spravovanými metadaty to SharePoint často odmítne." -ForegroundColor DarkGray
+            Write-Host "  Nastavte ho ručně: knihovna -> Nastavení -> Výchozí hodnoty sloupců." -ForegroundColor DarkGray
+        }
+        finally {
+            if ($unlocked) {
+                try {
+                    Set-PnPField -List $list.Id -Identity $target.InternalName -Values @{ ReadOnlyField = $true } -ErrorAction Stop | Out-Null
+                }
+                catch {
+                    Write-Host "  POZOR: sloupec se nepodařilo vrátit na ReadOnly. Vraťte ho ručně." -ForegroundColor Red
+                }
+            }
         }
     }
 }

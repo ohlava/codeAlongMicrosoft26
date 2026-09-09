@@ -354,4 +354,49 @@ ověří přes `-ListTerms`.
 
 ---
 
+## 2026-09-09 | TECH | Zápis spravovaných metadat má dva pokusy a kontrolu
+
+Zdroj: třetí běh proti webu TESTE. Sloupec se odemkl, CSOM zápis proběhl bez
+chyby, kontrola ale ukázala, že hodnota v knihovně není. Odemčení `ReadOnly`
+tedy nestačilo.
+
+Pravděpodobná příčina: `SetFieldValueByValue` potřebuje na objektu pole
+načtené vlastnosti (mimo jiné `TextField`, skrytý textový společník). Pole
+z `Get-PnPProperty -Property Fields` je má nenačtené a metoda pak projde
+naprázdno.
+
+Zápis je teď dvoufázový:
+
+1. `Set-PnPListItem` se všemi hodnotami najednou, včetně spravovaných metadat
+   předaných jako **GUID termínu**. PnP taxonomy umí - dřív selhávalo jen
+   proto, že dostávalo textový název, který si neumělo přeložit.
+2. Když kontrola ukáže, že se taxonomy hodnota nezapsala, zkusí se CSOM
+   s polem, které se explicitně načte přes `$context.Load($field)`.
+
+Na konci se vždy jedna složka přečte zpátky. Bez toho skript hlásil úspěch
+u zápisu, který SharePoint zahodil.
+
+---
+
+## 2026-09-09 | TECH | Systémové knihovny se poznávají podle cesty, ne podle názvu
+
+Zdroj: běh proti webu TESTE - krok `Files` našel jedinou knihovnu
+"Šablony formulářů" a tu skutečnou s dokumenty vynechal.
+
+Dvě chyby:
+
+- Filtr systémových knihoven porovnával **anglické názvy**, ale tenant je
+  český. "Form Templates" se jmenuje "Šablony formulářů", takže filtrem
+  prošla, zatímco skutečné knihovny ne. Nově se poznávají podle cesty
+  (`/FormServerTemplates`, `/SiteAssets`, `/SitePages`, `/Style Library`),
+  která je jazykově neutrální.
+- Výchozí knihovna `Dokumenty` byla vynechávaná záměrně, protože ji plní
+  struktura z Excelu. Jenže právě v ní jsou soubory, na které odkazují
+  stránky. Vynechává se teď jen to, co patří SharePointu.
+
+Navíc: `New-PnPList` vrací objekt bez naplněného `Id`, takže se knihovna po
+vytvoření musí znovu načíst přes `Get-PnPList`.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

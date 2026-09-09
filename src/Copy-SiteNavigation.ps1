@@ -318,7 +318,25 @@ function Copy-NavigationLevel {
             }
         }
         catch {
-            Add-NavWarning "Položku '$($node.Title)' nelze přidat: $($_.Exception.Message)"
+            # Odkaz na konkrétní pohled knihovny ("Forms/Project view.aspx")
+            # v cíli neexistuje, protože pohledy se nekopírují. Ať tam radši
+            # vede odkaz na knihovnu než žádný.
+            $fallback = $url -replace '/Forms/[^/]+\.aspx$', ''
+
+            if ($fallback -ne $url) {
+                try {
+                    $arguments["Url"] = $fallback
+                    $created = Add-PnPNavigationNode @arguments -ErrorAction Stop
+                    $added++
+                    Write-Host "$Indent+ $($node.Title)   (bez pohledu, ten v cíli není)" -ForegroundColor Yellow
+                }
+                catch {
+                    Add-NavWarning "Položku '$($node.Title)' nelze přidat ani bez pohledu: $($_.Exception.Message)"
+                }
+            }
+            else {
+                Add-NavWarning "Položku '$($node.Title)' nelze přidat: $($_.Exception.Message)"
+            }
         }
     }
 

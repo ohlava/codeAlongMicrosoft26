@@ -321,7 +321,7 @@ Vizuál se skládá z několika nezávislých věcí a každá se přenáší ji
 
 | Co je vidět | Přenáší | Když chybí |
 |-------------|---------|------------|
-| Barvy webu | krok `Pages`, `Set-PnPWebTheme` | Starší PnP neumí motiv ze vzoru přečíst — doplňte `themeName` do konfigurace |
+| Barvy webu | krok `Pages`, `Set-PnPWebTheme` | Vzor nemusí mít **pojmenovaný** motiv, jen vlastní barvy — pak ho nelze zkopírovat a je potřeba `themeName`. Nastavení motivu navíc vyžaduje vlastníka webu |
 | Logo, popis webu | krok `Pages`, handler `WebSettings` | — |
 | Tvar hlavičky, megamenu | krok `Pages` | — |
 | Rozložení stránky, webparty | krok `Pages` | — |
@@ -329,6 +329,7 @@ Vizuál se skládá z několika nezávislých věcí a každá se přenáší ji
 | Levá a horní navigace webu | krok `Navigation` | Hub navigace se dědí z hubu a nepřenáší se |
 | Odkazy a dlaždice plněné ze seznamu | krok `Lists` **s `-WithData`** | Bez `-WithData` zůstanou prázdné |
 | Soubory, na které stránky odkazují | krok `Files` | Bez nich odkazy nikam nevedou a nemají ikony |
+| Vlastní pohledy knihoven | nikde | Odkaz na `Forms/<pohled>.aspx` se nahradí odkazem na knihovnu |
 
 ### Odkazy na stránce nikam nevedou
 
@@ -340,11 +341,15 @@ webu jsou a v cíli ne.
 `Pages`. Kopíruje knihovny dokumentů ze vzoru včetně složek a souborů. Soubor,
 který v cíli už je, přeskočí, takže opakovaný běh je rychlý.
 
-Výchozí knihovnu `Dokumenty` vynechává — tu plní struktura z Excelu. Pokud
-chcete i její obsah ze vzoru, vypište ji do konfigurace:
+Kopírují se všechny knihovny dokumentů včetně výchozí `Dokumenty` — právě v ní
+bývají soubory, na které stránky odkazují. Vynechávají se jen ty, které patří
+SharePointu (`/FormServerTemplates`, `/SiteAssets`, `/SitePages`,
+`/Style Library`); poznají se podle cesty, protože názvy jsou lokalizované.
+
+Omezit výběr jde v konfiguraci:
 
 ```json
-"libraries": ["Dokumenty"]
+"libraries": ["Dokumenty", "Projektova dokumentace"]
 ```
 
 Kopíruje se přes lokální disk, takže velká knihovna trvá dlouho. Náhled bez

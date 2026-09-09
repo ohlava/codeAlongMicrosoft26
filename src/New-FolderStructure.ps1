@@ -734,6 +734,54 @@ Pokud je to ten správný, vložte do konfigurace jeho přesný název nebo GUID
     return $null
 }
 
+# TaxonomyField s načtenými vlastnostmi. SetFieldValueByValue potřebuje mimo
+# jiné TextField (skrytý textový společník), a ten na neúplně načteném objektu
+# chybí - zápis pak projde bez chyby a nic neuloží.
+function Get-LoadedTaxonomyField($List, $InternalName) {
+    $cacheKey = "loaded|$InternalName"
+    if ($script:TermCache.ContainsKey($cacheKey)) { return $script:TermCache[$cacheKey] }
+
+    $field = $null
+    try {
+        $raw = Get-TaxonomyField $List $InternalName
+        if ($raw) {
+            $context = Get-PnPContext
+            $context.Load($raw)
+            $context.ExecuteQuery()
+            $field = $raw
+        }
+    }
+    catch {
+        Add-StructureWarning "Sloupec '$InternalName' nelze načíst pro zápis: $($_.Exception.Message)"
+    }
+
+    $script:TermCache[$cacheKey] = $field
+    return $field
+}
+
+# Které z uvedených sloupců na vzorové složce chybí. Slouží k rozhodnutí,
+# jestli má smysl zkoušet druhou cestu zápisu.
+function Get-UnwrittenFields($List, $LibraryRoot, $Desired, $FieldIndex, $Keys) {
+    $sample = @($Desired | Where-Object { $_.Metadata.Count -gt 0 } | Select-Object -First 1)
+    if ($sample.Count -eq 0) { return @() }
+
+    try {
+        $current = Get-ExistingFolderMap $List $LibraryRoot
+        if (-not $current.ContainsKey($sample[0].Path)) { return @() }
+
+        $item = $current[$sample[0].Path]
+        return @($Keys | Where-Object {
+            $field = Resolve-Field $_ $FieldIndex
+            if (-not $field) { return $false }
+            $value = $item.FieldValues[$field.InternalName]
+            ($null -eq $value) -or ("$value" -eq "")
+        })
+    }
+    catch {
+        return @()
+    }
+}
+
 # Ověří na jedné složce, že hodnoty v knihovně opravdu jsou. Zápis, který
 # SharePoint zahodí, jinak vypadá jako úspěšný.
 function Confirm-MetadataWritten($List, $LibraryRoot, $Desired, $FieldIndex) {
@@ -1061,8 +1109,10 @@ if (-not $SkipMetadata) {
             $fieldIndex = Get-FieldIndex $list
         }
 
+        # 1. pokus: všechno jedním Set-PnPListItem. PnP umí i spravovaná
+        # metadata, když dostane GUID termínu - dřív selhávalo jen proto, že
+        # dostávalo textový název, který si neumělo přeložit.
         $updated = 0
-        $taxonomyWrites = 0
 
         foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
             if (-not $existing.ContainsKey($folder.Path)) {
@@ -1072,53 +1122,73 @@ if (-not $SkipMetadata) {
 
             $item = $existing[$folder.Path]
             $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path $list
-            $touched = $false
 
-            if ($values.Plain.Count -gt 0) {
-                try {
-                    Set-PnPListItem -List $list.Id `
-                        -Identity $item.Id `
-                        -Values $values.Plain `
-                        -ErrorAction Stop | Out-Null
-                    $touched = $true
-                }
-                catch {
-                    Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
-                }
-            }
-
-            # Spravovaná metadata se zapisují přes CSOM a odešlou se dávkou
-            # v Invoke-PnPQuery, až projdou všechny složky.
+            $all = @{}
+            foreach ($key in $values.Plain.Keys) { $all[$key] = $values.Plain[$key] }
             foreach ($assignment in $values.Taxonomy) {
-                $source = Get-TermsForField $list $assignment.InternalName
-                if (-not $source.Field) { continue }
-
-                try {
-                    Set-TaxonomyFieldValue $source.Field $item $assignment.Term
-                    $taxonomyWrites++
-                    $touched = $true
-                }
-                catch {
-                    Add-StructureWarning "Termín do '$($assignment.InternalName)' u '$($folder.Path)' nelze nastavit: $($_.Exception.Message)"
-                }
+                $all[$assignment.InternalName] = "$($assignment.Term.Id)"
             }
 
-            if ($touched) { $updated++ }
-        }
+            if ($all.Count -eq 0) { continue }
 
-        if ($taxonomyWrites -gt 0) {
-            Write-Host "  odesílám $taxonomyWrites zápisů spravovaných metadat"
             try {
-                Invoke-PnPQuery
+                Set-PnPListItem -List $list.Id -Identity $item.Id -Values $all `
+                    -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+                $updated++
             }
             catch {
-                Add-StructureWarning "Zápis spravovaných metadat se nepodařilo odeslat: $($_.Exception.Message)"
+                Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
             }
-
-            # SharePoint umí zápis zahodit bez chyby. Přečteme si jednu složku
-            # zpátky, ať se nestane, že skript ohlásí úspěch a v knihovně nic.
-            Confirm-MetadataWritten $list $libraryRoot $desired $fieldIndex
         }
+
+        # 2. pokus jen pro spravovaná metadata, když je první nezapsal.
+        # SharePoint je umí přijmout bez chyby a zahodit, proto se to ověřuje.
+        $taxonomyKeys = @($desired |
+            ForEach-Object { $_.Metadata.Keys } |
+            Sort-Object -Unique |
+            Where-Object {
+                $f = Resolve-Field $_ $fieldIndex
+                $f -and (Test-IsTaxonomyField $f)
+            })
+
+        if ($taxonomyKeys.Count -gt 0) {
+            $missing = Get-UnwrittenFields $list $libraryRoot $desired $fieldIndex $taxonomyKeys
+
+            if ($missing.Count -gt 0) {
+                Write-Host "  spravovaná metadata neprošla přes Set-PnPListItem, zkouším CSOM" -ForegroundColor Yellow
+
+                $csomWrites = 0
+                foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
+                    if (-not $existing.ContainsKey($folder.Path)) { continue }
+
+                    $item = $existing[$folder.Path]
+                    $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path $list
+
+                    foreach ($assignment in $values.Taxonomy) {
+                        $field = Get-LoadedTaxonomyField $list $assignment.InternalName
+                        if (-not $field) { continue }
+
+                        try {
+                            Set-TaxonomyFieldValue $field $item $assignment.Term
+                            $csomWrites++
+                        }
+                        catch {
+                            Add-StructureWarning "Termín do '$($assignment.InternalName)' u '$($folder.Path)' nelze nastavit: $($_.Exception.Message)"
+                        }
+                    }
+                }
+
+                if ($csomWrites -gt 0) {
+                    Write-Host "  odesílám $csomWrites zápisů"
+                    try { Invoke-PnPQuery }
+                    catch { Add-StructureWarning "Zápis spravovaných metadat se nepodařilo odeslat: $($_.Exception.Message)" }
+                }
+            }
+        }
+
+        # Závěrečná kontrola na jedné složce - ať skript nehlásí úspěch,
+        # když v knihovně nic není.
+        Confirm-MetadataWritten $list $libraryRoot $desired $fieldIndex
 
         Write-Host "  aktualizováno složek: $updated"
     }
