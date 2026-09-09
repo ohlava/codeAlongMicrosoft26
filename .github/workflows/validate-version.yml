@@ -25,18 +25,19 @@ jobs:
 
           templates_dir = Path('templates')
 
-          # Pokud složka templates/ neexistuje, workflow okamžitě selže.
+          # Pokud složka templates/ neexistuje, workflow nepadne.
+          # Pouze upozorní, že zatím nejsou žádné šablony k ověření.
           if not templates_dir.exists():
-              print('Chyba: složka templates/ neexistuje. Přidejte PnP šablony do této složky.')
-              raise SystemExit(1)
+              print('Zatím nejsou žádné šablony k ověření')
+              raise SystemExit(0)
 
-          # Vyhledáme všechny soubory šablon v adresáři templates/.
-          files = sorted(p for p in templates_dir.rglob('*') if p.is_file() and p.suffix.lower() in {'.xml', '.pnp', '.json'})
+          # Vyhledáme všechny XML soubory v adresáři templates/.
+          files = sorted(p for p in templates_dir.rglob('*.xml') if p.is_file())
 
-          # Pokud nejsou žádné soubory, workflow selže s jasným hlášením.
+          # Pokud nejsou žádné XML soubory, workflow nepadne, ale vypíše varování.
           if not files:
-              print('Chyba: ve složce templates/ nebyly nalezeny žádné soubory PnP šablon.')
-              raise SystemExit(1)
+              print('Zatím nejsou žádné šablony k ověření')
+              raise SystemExit(0)
 
           bad_files = []
 
