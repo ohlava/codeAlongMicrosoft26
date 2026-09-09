@@ -112,18 +112,30 @@ A jaké hodnoty přijímá CSD Class:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\Set-CsdClass.ps1 -SiteUrl "<URL vzoroveho webu>" -Library "Dokumenty" -Field RevIMBCS -ListTerms
 ```
 
-Hodnota v `fixedMetadata` se hledá v tomto pořadí: GUID, přesný název, **shoda
-čísla na začátku**, začátek názvu. Termíny klasifikačního schématu začínají
-číslem a text za ním se v Term Store často liší formulací, takže
-`"5.3 Car Series and Concept Docs"` najde i termín
-`"5.3 Car series and concept documents"`. Když se to stane, skript to napíše:
+Hodnota v `fixedMetadata` se hledá takto:
+
+1. **GUID termínu** — nejspolehlivější,
+2. **přesný název** nebo **štítek v libovolném jazyce**. Termíny mají štítek pro
+   každý jazyk Term Store, takže anglický název najde i termín, který se
+   v českém prostředí zobrazuje česky,
+3. **stejné číslo a zároveň stejný text za ním** — pokryje jinou velikost
+   písmen nebo interpunkci.
+
+**Samotná shoda čísla nestačí.** Číslo `5.3` má v jiné větvi schématu jiný
+význam, takže by se zapsala cizí klasifikace. Když sedí jen číslo, skript
+zápis odmítne a vypíše kandidáta:
 
 ```
-  termín '5.3 Car Series and Concept Docs' -> '5.3 Car series and concept documents'
+Termín '5.3 Car Series and Concept Docs' v term setu není.
+Číslo 5.3 má tento termín, ale jiný text - NEZAPISUJI ho, protože
+stejné číslo v jiné větvi znamená něco jiného:
+    5.3 Schválení / povinná dokumentace pro sériový / konečný produkt
+      f180d7d0-51f7-4ecb-b85b-8794451fa5fb
 ```
 
-Stačí zadat i jen `"5.3"`. Když se termín nenajde vůbec, skript rovnou vypíše,
-co term set obsahuje, a uloží úplný seznam do `export/terms-<sloupec>.csv`.
+Pokud je kandidát ten správný, vložte do konfigurace jeho **přesný název nebo
+GUID**. Když se nenajde nic, skript vypíše obsah term setu a uloží ho do
+`export/terms-<sloupec>.csv`.
 
 ## 1.5 Jak se CSD Class nastavuje
 
@@ -139,9 +151,17 @@ Metadata zapsaná na složku se na soubory v ní **nepřenesou** — proto ta v�
 hodnota sloupce.
 
 `RevIMBCS` (`CSD Class`) je sloupec se spravovanými metadaty a je `ReadOnly`,
-protože patří k records managementu. Zapisuje se do něj přes CSOM
-(`SetFieldValueByValue`), kterému příznak `ReadOnly` nevadí — postup převzatý
-ze `Set-CsdClass.ps1` od Sergiu Nicy. **Odemykat sloupec není potřeba.**
+protože patří k records managementu. Zápis do něj má dvě části:
+
+- **hodnota** se skládá přes CSOM `SetFieldValueByValue` (postup ze
+  `Set-CsdClass.ps1` od Sergiu Nicy), protože `Set-PnPListItem` taxonomy
+  hodnotu neumí,
+- **příznak `ReadOnly`** se na dobu zápisu automaticky sundá a hned vrátí zpět.
+  Bez toho SharePoint zápis přijme bez chyby, ale hodnotu neuloží — a to i přes
+  CSOM. Vypnout to jde přepínačem `-SkipReadOnlyFields`.
+
+Po zápisu si skript jednu složku přečte zpátky a ověří, že hodnota opravdu
+v knihovně je. Kdyby ne, napíše to červeně místo aby ohlásil úspěch.
 
 > Zápis do `RevIMBCS` je zásah do klasifikace záznamů. Že to technicky jde,
 > neznamená, že se to smí — potvrďte si to se správcem records managementu a

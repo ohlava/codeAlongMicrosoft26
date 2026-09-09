@@ -295,4 +295,39 @@ záměrný odkaz. Duplicitám brání už samo slučování podle názvu, takže
 
 ---
 
+## 2026-09-09 | TECH | Shoda termínu podle samotného čísla se odmítá
+
+Zdroj: běh proti webu TESTE. Hodnota `5.3 Car Series and Concept Docs` se
+napárovala na `5.3 Schválení / povinná dokumentace pro sériový / konečný
+produkt`, protože sedělo číslo `5.3`. To je **jiná klasifikace** - zápis by
+označil dokumenty cizí třídou.
+
+Pořadí hledání je teď: GUID, přesný název nebo štítek v libovolném jazyce,
+stejné číslo **a zároveň** stejný text za ním. Samotné číslo se neakceptuje -
+skript zápis odmítne a vypíše kandidáta, ať o něm rozhodne člověk.
+
+Termíny se navíc načítají včetně `Labels`, takže anglický název najde i termín,
+který se v českém Term Store zobrazuje česky. Načítá se jedním dávkovým
+`ExecuteQuery`, ne dotazem na každý termín.
+
+Ponaučení: u klasifikace záznamů je tiché uhodnutí horší než selhání.
+
+---
+
+## 2026-09-09 | TECH | ReadOnly blokuje zápis i přes CSOM
+
+Zdroj: běh proti webu TESTE. Skript ohlásil "odesílám 36 zápisů spravovaných
+metadat" a "aktualizováno složek: 36", ale v knihovně nebylo nic.
+
+Předpoklad, že `SetFieldValueByValue` obejde příznak `ReadOnlyField`, byl
+špatný. SharePoint zápis přijme bez chyby a zahodí ho.
+
+Sloupce, do kterých se zapisuje, se proto na dobu zápisu odemykají automaticky
+a ve `finally` bloku vracejí zpět. Vypnout to jde `-SkipReadOnlyFields`.
+
+Přidána kontrola po zápisu: jedna složka se přečte zpátky a ověří se, že
+hodnota v knihovně opravdu je. Tichý neúspěch se tak pozná hned.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

@@ -148,13 +148,26 @@ if ($isTaxonomy) {
     $context.Load($terms)
     $context.ExecuteQuery()
 
+    # Termín má štítek v každém jazyce Term Store. Name vrací jen ten
+    # v pracovním jazyce, takže anglický název by se jinak nenašel.
+    foreach ($t in $terms) { $context.Load($t.Labels) }
+    $context.ExecuteQuery()
+
+    function Get-AllLabels($Term) {
+        $labels = @($Term.Name)
+        try { $labels += @($Term.Labels | ForEach-Object { $_.Value }) } catch { }
+        return @($labels | Where-Object { $_ } | Sort-Object -Unique)
+    }
+
     Write-Host "  term set: $($target.TermSetId)"
     Write-Host "  termínů:  $($terms.Count)"
 
     if ($ListTerms) {
         Write-Step "Dostupné termíny"
         $terms | Sort-Object Name | ForEach-Object {
-            Write-Host ("  {0,-45} {1}" -f $_.Name, $_.Id)
+            $other = @(Get-AllLabels $_ | Where-Object { $_ -ne $_.Name })
+            $suffix = if ($other.Count -gt 0) { "   [$($other -join ' | ')]" } else { "" }
+            Write-Host ("  {0,-45} {1}{2}" -f $_.Name, $_.Id, $suffix)
         }
         return
     }
@@ -171,20 +184,32 @@ if ($isTaxonomy) {
     $wanted = Get-NormalizedName $Value
     $wantedNumber = Get-TermNumber $wanted
 
+    # Text za číslem, pro porovnání "totéž jinak zapsané".
+    function Get-ComparableName($Name) {
+        $text = "$Name" -replace '^\s*\d+(?:\.\d+)*\s*', ''
+        return ($text -replace '[^\p{L}\p{Nd}]', '').ToLowerInvariant()
+    }
+
     $candidates = @($terms | Where-Object { $_.Id.ToString() -eq $wanted })
 
-    if ($candidates.Count -eq 0) {
-        $candidates = @($terms | Where-Object { (Get-NormalizedName $_.Name) -eq $wanted })
-    }
-    if ($candidates.Count -eq 0 -and $wantedNumber) {
-        $candidates = @($terms | Where-Object { (Get-TermNumber $_.Name) -eq $wantedNumber })
-    }
+    # Přesná shoda s názvem nebo s kterýmkoli jazykovým štítkem.
     if ($candidates.Count -eq 0) {
         $candidates = @($terms | Where-Object {
-            $name = Get-NormalizedName $_.Name
-            $name.StartsWith($wanted, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $wanted.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)
+            (Get-AllLabels $_) | Where-Object { (Get-NormalizedName $_) -eq $wanted }
         })
+    }
+
+    # Stejné číslo A zároveň stejný text za ním. Samotné číslo nestačí -
+    # stejné číslo v jiné větvi znamená jinou klasifikaci.
+    if ($candidates.Count -eq 0 -and $wantedNumber) {
+        $wantedText = Get-ComparableName $wanted
+        if ($wantedText) {
+            $candidates = @($terms | Where-Object {
+                (Get-AllLabels $_) | Where-Object {
+                    (Get-TermNumber $_) -eq $wantedNumber -and (Get-ComparableName $_) -eq $wantedText
+                }
+            })
+        }
     }
 
     if ($candidates.Count -gt 1) {
@@ -193,6 +218,28 @@ if ($isTaxonomy) {
     }
 
     if ($candidates.Count -eq 0) {
+        # Kandidáta se stejným číslem ukážeme, ale nepoužijeme ho.
+        $sameNumber = @()
+        if ($wantedNumber) {
+            $sameNumber = @($terms | Where-Object {
+                (Get-AllLabels $_) | Where-Object { (Get-TermNumber $_) -eq $wantedNumber }
+            })
+        }
+
+        if ($sameNumber.Count -gt 0) {
+            $list = ($sameNumber | Select-Object -First 5 |
+                ForEach-Object { "  $($_.Name)`n    $($_.Id)" }) -join "`n"
+            throw @"
+Termín '$Value' v term setu není.
+
+Číslo $wantedNumber má tento termín, ale s jiným textem. Nepoužívám ho, protože
+stejné číslo v jiné větvi znamená jinou klasifikaci:
+$list
+
+Pokud je to ten správný, vložte do konfigurace jeho přesný název nebo GUID.
+"@
+        }
+
         $all = ($terms | Sort-Object Name | Select-Object -First 30 |
             ForEach-Object { "  $($_.Name)" }) -join "`n"
         $more = if ($terms.Count -gt 30) { "`n  ... a dalších $($terms.Count - 30)" } else { "" }
@@ -293,6 +340,22 @@ if ($Scope -ne "ExistingFiles") {
 if ($Scope -ne "DefaultValue") {
     Write-Step "Označuji existující soubory"
 
+    # SharePoint zápis do sloupce označeného ReadOnly tiše zahodí, a to i přes
+    # CSOM. Na dobu zápisu ho odemkneme a ve finally vrátíme zpět.
+    $wasReadOnly = [bool]$target.ReadOnlyField
+    if ($wasReadOnly) {
+        try {
+            Set-PnPField -List $list.Id -Identity $target.InternalName -Values @{ ReadOnlyField = $false } -ErrorAction Stop | Out-Null
+            Write-Host "  sloupec dočasně odemčen" -ForegroundColor Yellow
+        }
+        catch {
+            Write-Host "  sloupec nelze odemknout: $($_.Exception.Message)" -ForegroundColor Red
+            $wasReadOnly = $false
+        }
+    }
+
+    try {
+
     $items = Get-PnPListItem -List $list.Id -PageSize 500 -Fields "FileLeafRef", "FSObjType", $target.InternalName
     $files = @($items | Where-Object { $_.FieldValues.FSObjType -eq 0 })
 
@@ -336,7 +399,33 @@ if ($Scope -ne "DefaultValue") {
         }
     }
 
-    Write-Host "  označeno: $updated, chyb: $failed"
+        Write-Host "  označeno: $updated, chyb: $failed"
+
+        # Ověřit na jedné položce, že hodnota v knihovně opravdu je.
+        if ($updated -gt 0) {
+            $check = Get-PnPListItem -List $list.Id -Id $files[0].Id -Fields $target.InternalName
+            $written = $check.FieldValues[$target.InternalName]
+
+            if ($null -eq $written -or "$written" -eq "") {
+                Write-Host "  KONTROLA: hodnota se neuložila, i když zápis prošel bez chyby." -ForegroundColor Red
+                Write-Host "  Nejčastější příčina je Sealed sloupec nebo chybějící oprávnění." -ForegroundColor Red
+            }
+            else {
+                Write-Host "  kontrola: hodnota zapsána" -ForegroundColor Green
+            }
+        }
+    }
+    finally {
+        if ($wasReadOnly) {
+            try {
+                Set-PnPField -List $list.Id -Identity $target.InternalName -Values @{ ReadOnlyField = $true } -ErrorAction Stop | Out-Null
+                Write-Host "  sloupec vrácen na ReadOnly" -ForegroundColor Yellow
+            }
+            catch {
+                Write-Host "  POZOR: sloupec se nepodařilo vrátit na ReadOnly: $($_.Exception.Message). Vraťte ho ručně." -ForegroundColor Red
+            }
+        }
+    }
 }
 
 Write-Step "Hotovo"

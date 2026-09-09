@@ -45,13 +45,13 @@
     term setu, ke kterému je připojený, i s jejich GUIDy, a uloží je do
     export/terms-<sloupec>.csv. Slouží k dohledání přesného názvu termínu.
 
-.PARAMETER UnlockReadOnlyFields
-    Obyčejný sloupec označený ReadOnlyField zápis tiše zahodí. S tímto
-    přepínačem ho skript před zápisem odemkne a po dokončení vrátí zpět na
-    ReadOnly - i když zápis mezitím selže. Vyžaduje právo měnit sloupce knihovny.
+.PARAMETER SkipReadOnlyFields
+    Sloupec označený ReadOnlyField zápis tiše zahodí, proto ho skript na dobu
+    zápisu automaticky odemkne a hned vrátí zpět - i když zápis mezitím selže.
+    Platí to i pro sloupce se spravovanými metadaty.
 
-    Pro sloupce se spravovanými metadaty tohle potřeba NENÍ - do těch se
-    zapisuje přes CSOM, kterému příznak ReadOnly nevadí.
+    Tímto přepínačem se odemykání vypne. Hodnoty do zamčených sloupců se pak
+    nezapíšou.
 
 .PARAMETER ListFields
     Nic nevytváří. Vypíše sloupce knihovny s jejich interními názvy a typy
@@ -112,9 +112,9 @@ param(
     # Slouží k dohledání přesného názvu nebo GUIDu termínu.
     [string] $ListTerms = "",
 
-    # Sloupce označené ReadOnlyField na dobu zápisu odemkne a na konci je vrátí
-    # zpět na ReadOnly, i když zápis selže.
-    [switch] $UnlockReadOnlyFields,
+    # Ponechá sloupce označené ReadOnlyField zamčené. Zápis do nich pak
+    # neprojde - SharePoint ho tiše zahodí.
+    [switch] $SkipReadOnlyFields,
 
     # Prázdné = autodetekce podle hlavičky. České Excely ukládají CSV se ";".
     [string] $Delimiter = "",
@@ -458,13 +458,6 @@ function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath, $List) {
             continue
         }
 
-        # Do obyčejného sloupce označeného ReadOnlyField SharePoint zápis přes
-        # Set-PnPListItem tiše zahodí - projde bez chyby, hodnota se neuloží.
-        if ($field.ReadOnly -and -not $UnlockReadOnlyFields) {
-            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je ReadOnly, zápis by se zahodil. Použijte -UnlockReadOnlyFields, nebo ho odemkněte ručně."
-            continue
-        }
-
         $plain[$field.InternalName] = $Metadata[$key]
     }
 
@@ -611,7 +604,23 @@ function Get-TermsForField($List, $InternalName) {
         $context.Load($terms)
         $context.ExecuteQuery()
 
-        $result.Terms = @($terms)
+        # Termín má štítek v každém jazyce Term Store. Name vrací jen ten
+        # v pracovním jazyce, takže anglický název by se jinak nenašel.
+        # Všechny Load se pošlou jedním dotazem, ne 74krát za sebou.
+        foreach ($term in $terms) { $context.Load($term.Labels) }
+        $context.ExecuteQuery()
+
+        $result.Terms = @(foreach ($term in $terms) {
+            $labels = @()
+            try { $labels = @($term.Labels | ForEach-Object { $_.Value }) } catch { }
+
+            [pscustomobject]@{
+                Term   = $term
+                Name   = $term.Name
+                Id     = $term.Id.ToString()
+                Labels = @(@($term.Name) + $labels | Where-Object { $_ } | Sort-Object -Unique)
+            }
+        })
     }
     catch {
         Add-StructureWarning "Termíny pro '$InternalName' nelze načíst: $($_.Exception.Message). Máte přístup na Term Store?"
@@ -623,9 +632,9 @@ function Get-TermsForField($List, $InternalName) {
 
 $script:TermResolution = @{}
 
-# Termíny v klasifikačních schématech začínají číslem ("5.3 Car Series and
-# Concept Docs"). Číslo je stabilní, text za ním se v Term Store liší
-# formulací, pomlčkou nebo velikostí písmen - proto se porovnává hlavně ono.
+# Termíny klasifikačního schématu začínají číslem ("5.3 ..."). Číslo samo o sobě
+# ale termín NEURČUJE - stejné číslo může mít v jiné větvi úplně jiný význam.
+# Proto se používá jen jako doplněk k textové shodě, nikdy samostatně.
 function Get-TermNumber($Name) {
     if ("$Name" -match '^\s*(\d+(?:\.\d+)*)') { return $Matches[1] }
     return $null
@@ -635,8 +644,17 @@ function Get-NormalizedTermName($Name) {
     return (("$Name" -replace '\s+', ' ').Trim())
 }
 
-# Termín podle názvu, čísla, nebo GUIDu. Vrací objekt termínu, nebo $null.
-# Výsledek se pamatuje, aby stejný termín nehlásil chybu u každé složky zvlášť.
+# Text pro porovnání "je to totéž jinak zapsané": bez diakritiky nerozlišujeme,
+# ale interpunkci a velikost písmen ano ne.
+function Get-ComparableTermName($Name) {
+    $text = "$Name" -replace '^\s*\d+(?:\.\d+)*\s*', ''
+    $text = $text -replace '[^\p{L}\p{Nd}]', ''
+    return $text.ToLowerInvariant()
+}
+
+# Termín podle GUIDu, názvu, nebo štítku v libovolném jazyce.
+# Vrací descriptor termínu, nebo $null. Výsledek se pamatuje, aby se stejná
+# hláška neopakovala u každé složky.
 function Resolve-Term($List, $InternalName, $Label) {
     $cacheKey = "$InternalName|$Label"
     if ($script:TermResolution.ContainsKey($cacheKey)) {
@@ -649,28 +667,29 @@ function Resolve-Term($List, $InternalName, $Label) {
     if ($source.Terms.Count -eq 0) { return $null }
 
     $wanted = Get-NormalizedTermName $Label
-    $wantedNumber = Get-TermNumber $wanted
 
     # 1. GUID
-    $match = @($source.Terms | Where-Object { $_.Id.ToString() -eq $wanted })
+    $match = @($source.Terms | Where-Object { $_.Id -eq $wanted })
 
-    # 2. přesný název
-    if ($match.Count -eq 0) {
-        $match = @($source.Terms | Where-Object { (Get-NormalizedTermName $_.Name) -eq $wanted })
-    }
-
-    # 3. shoda čísla na začátku - "5.3" i "5.3 Cokoliv" najde termín číslo 5.3
-    if ($match.Count -eq 0 -and $wantedNumber) {
-        $match = @($source.Terms | Where-Object { (Get-TermNumber $_.Name) -eq $wantedNumber })
-    }
-
-    # 4. jeden název je začátkem druhého
+    # 2. přesná shoda s názvem nebo s kterýmkoli jazykovým štítkem
     if ($match.Count -eq 0) {
         $match = @($source.Terms | Where-Object {
-            $name = Get-NormalizedTermName $_.Name
-            $name.StartsWith($wanted, [System.StringComparison]::OrdinalIgnoreCase) -or
-            $wanted.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)
+            $_.Labels | Where-Object { (Get-NormalizedTermName $_) -eq $wanted }
         })
+    }
+
+    # 3. stejné číslo A zároveň stejný text za ním - jen jinak zapsaný
+    if ($match.Count -eq 0) {
+        $wantedNumber = Get-TermNumber $wanted
+        $wantedText = Get-ComparableTermName $wanted
+
+        if ($wantedNumber -and $wantedText) {
+            $match = @($source.Terms | Where-Object {
+                $_.Labels | Where-Object {
+                    (Get-TermNumber $_) -eq $wantedNumber -and (Get-ComparableTermName $_) -eq $wantedText
+                }
+            })
+        }
     }
 
     if ($match.Count -eq 1) {
@@ -688,10 +707,70 @@ function Resolve-Term($List, $InternalName, $Label) {
         return $null
     }
 
-    # Nenašlo se - vypsat, co term set obsahuje, ať se to nemusí hledat jinde.
+    # Shodu podle samotného čísla schválně NEPŘIJÍMÁME - stejné číslo mívá
+    # v jiné větvi jiný význam a zapsat cizí klasifikaci je horší než selhat.
+    # Kandidáta ale ukážeme, ať je vidět, co se nabízí.
+    $wantedNumber = Get-TermNumber $wanted
+    if ($wantedNumber) {
+        $sameNumber = @($source.Terms | Where-Object {
+            $_.Labels | Where-Object { (Get-TermNumber $_) -eq $wantedNumber }
+        })
+
+        if ($sameNumber.Count -gt 0) {
+            $list = ($sameNumber | Select-Object -First 5 | ForEach-Object { "    $($_.Name)`n      $($_.Id)" }) -join "`n"
+            Add-StructureWarning @"
+Termín '$Label' v term setu není.
+Číslo $wantedNumber má tento termín, ale jiný text - NEZAPISUJI ho, protože
+stejné číslo v jiné větvi znamená něco jiného:
+$list
+Pokud je to ten správný, vložte do konfigurace jeho přesný název nebo GUID.
+"@
+            return $null
+        }
+    }
+
     Add-StructureWarning "Termín '$Label' v term setu není."
     Show-AvailableTerms $source.Terms $InternalName
     return $null
+}
+
+# Ověří na jedné složce, že hodnoty v knihovně opravdu jsou. Zápis, který
+# SharePoint zahodí, jinak vypadá jako úspěšný.
+function Confirm-MetadataWritten($List, $LibraryRoot, $Desired, $FieldIndex) {
+    $sample = @($Desired | Where-Object { $_.Metadata.Count -gt 0 } | Select-Object -First 1)
+    if ($sample.Count -eq 0) { return }
+    $folder = $sample[0]
+
+    try {
+        $current = Get-ExistingFolderMap $List $LibraryRoot
+        if (-not $current.ContainsKey($folder.Path)) { return }
+
+        $item = $current[$folder.Path]
+        $missing = @()
+
+        foreach ($key in $folder.Metadata.Keys) {
+            $field = Resolve-Field $key $FieldIndex
+            if (-not $field) { continue }
+
+            $value = $item.FieldValues[$field.InternalName]
+            $isEmpty = ($null -eq $value) -or ("$value" -eq "")
+            if ($isEmpty) { $missing += $field.InternalName }
+        }
+
+        if ($missing.Count -gt 0) {
+            Add-StructureWarning @"
+Kontrola na složce '$($folder.Path)' ukázala, že se nezapsalo: $($missing -join ', ')
+SharePoint zápis přijal bez chyby, ale hodnotu neuložil. Nejčastější příčina je
+sloupec označený ReadOnly nebo Sealed. Zkontrolujte ho přes -ListFields.
+"@
+        }
+        else {
+            Write-Host "  kontrola na '$($folder.Path)': hodnoty zapsány" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Verbose "Kontrolu zápisu nelze provést: $($_.Exception.Message)"
+    }
 }
 
 function Show-AvailableTerms($Terms, $InternalName) {
@@ -700,7 +779,9 @@ function Show-AvailableTerms($Terms, $InternalName) {
 
     $sorted = @($Terms | Sort-Object Name)
     foreach ($term in ($sorted | Select-Object -First 30)) {
-        Write-Host "    $($term.Name)" -ForegroundColor DarkGray
+        $other = @($term.Labels | Where-Object { $_ -ne $term.Name })
+        $suffix = if ($other.Count -gt 0) { "   [$($other -join ' | ')]" } else { "" }
+        Write-Host "    $($term.Name)$suffix" -ForegroundColor DarkGray
     }
     if ($sorted.Count -gt 30) {
         Write-Host "    ... a dalších $($sorted.Count - 30)" -ForegroundColor DarkGray
@@ -708,7 +789,9 @@ function Show-AvailableTerms($Terms, $InternalName) {
 
     try {
         $target = "$OutputFolder/terms-$InternalName.csv"
-        $sorted | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Id = $_.Id.ToString() } } |
+        $sorted | ForEach-Object {
+            [pscustomobject]@{ Name = $_.Name; Id = $_.Id; Labels = ($_.Labels -join " | ") }
+        } |
             Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
         Write-Host "  Úplný seznam v $target" -ForegroundColor Yellow
     }
@@ -725,7 +808,7 @@ function Show-AvailableTerms($Terms, $InternalName) {
 function Set-TaxonomyFieldValue($Field, $Item, $Term) {
     $value = New-Object Microsoft.SharePoint.Client.Taxonomy.TaxonomyFieldValue
     $value.Label = $Term.Name
-    $value.TermGuid = $Term.Id.ToString()
+    $value.TermGuid = "$($Term.Id)"
     # -1 znamená, že si SharePoint dohledá WssId sám.
     $value.WssId = -1
 
@@ -749,10 +832,14 @@ function Show-TermSet($List, $FieldInternalName, $OutFolder) {
     }
 
     $rows = $source.Terms | ForEach-Object {
-        [pscustomobject]@{ Name = $_.Name; Id = $_.Id.ToString() }
+        [pscustomobject]@{
+            Name   = $_.Name
+            Labels = (@($_.Labels | Where-Object { $_ -ne $_.Name }) -join " | ")
+            Id     = $_.Id
+        }
     }
 
-    $rows | Sort-Object Name | Format-Table Name, Id -AutoSize | Out-String -Width 220 | Write-Host
+    $rows | Sort-Object Name | Format-Table Name, Labels, Id -AutoSize | Out-String -Width 240 | Write-Host
 
     $target = "$OutFolder/terms-$FieldInternalName.csv"
     $rows | Sort-Object Name | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
@@ -949,8 +1036,10 @@ if (-not $SkipMetadata) {
     $fieldIndex = Get-FieldIndex $list
 
     # Sloupce, do kterých se má zapisovat a které jsou zamčené na ReadOnly.
+    # SharePoint u nich zápis tiše zahodí - a to i přes CSOM, takže je nutné
+    # je na dobu zápisu odemknout a hned vrátit zpět.
     $lockedFields = @()
-    if ($UnlockReadOnlyFields) {
+    if (-not $SkipReadOnlyFields) {
         $wantedKeys = @($desired | ForEach-Object { $_.Metadata.Keys } | Sort-Object -Unique)
         foreach ($key in $wantedKeys) {
             $field = Resolve-Field $key $fieldIndex
@@ -1023,6 +1112,10 @@ if (-not $SkipMetadata) {
             catch {
                 Add-StructureWarning "Zápis spravovaných metadat se nepodařilo odeslat: $($_.Exception.Message)"
             }
+
+            # SharePoint umí zápis zahodit bez chyby. Přečteme si jednu složku
+            # zpátky, ať se nestane, že skript ohlásí úspěch a v knihovně nic.
+            Confirm-MetadataWritten $list $libraryRoot $desired $fieldIndex
         }
 
         Write-Host "  aktualizováno složek: $updated"
