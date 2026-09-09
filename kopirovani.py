@@ -24,8 +24,8 @@ import requests
 
 # ============================ KONFIGURACE ================================
 
-SOURCE_SITE = "https://volkswagengroup.sharepoint.com/sites/Test_A"
-TARGET_SITE = "https://volkswagengroup.sharepoint.com/sites/Project02"
+SOURCE_SITE = "https://volkswagengroup.sharepoint.com/sites/TESTD"
+TARGET_SITE = "https://volkswagengroup.sharepoint.com/sites/TargetTESTD"
 
 SOURCE_COOKIE_FILE = "cookies.txt"
 TARGET_COOKIE_FILE = "target_cookies.txt"
@@ -33,15 +33,18 @@ TARGET_COOKIE_FILE = "target_cookies.txt"
 PROXY = "http://127.0.0.1:9001"          # <-- dopln svoji proxy (nebo nastav None)
 proxies = {"http": PROXY, "https": PROXY} if PROXY else None
 
-DRY_RUN = False                  # True = nic nezapisuje, jen simuluje a loguje
-DELETE_TARGET_CONTENT = True    # True = pred kopirovanim smaze OBSAH odpovidajiciho seznamu na cili
-PRINT_CONTENTS = True           # True = podrobne vypise obsah kazdeho seznamu na zdroji
-COPY_SOURCE_FIELDS = True       # True = vytvori na cili chybejici sloupce ze zdroje (vc. taxonomy)
-COPY_SITE_ASSETS = True         # True = zkopiruje SiteAssets/Style Library (obrazky, bannery)
-COPY_WELCOME_PAGE = True        # True = nastavi domovskou stranku (WelcomePage) dle zdroje
-CREATE_MISSING_LISTS = True     # True = vytvori na cili seznamy/knihovny, ktere existuji jen na zdroji
-COPY_VIEWS = True               # True = prevezme zobrazeni (views) seznamu ze zdroje
-COPY_NAVIGATION = True          # True = prevezme navigaci (Quick Launch + horni menu) ze zdroje
+DRY_RUN = False                   # True = nic nezapisuje ani nemaze, jen loguje
+WIPE_TARGET = True               # True = na zacatku SMAZE VSE na cili (uplne znovu)
+DELETE_TARGET_CONTENT = True     # (pri WIPE_TARGET=True uz neni potreba, ale nevadi)
+PRINT_CONTENTS = True            # True = podrobne vypise obsah kazdeho seznamu na zdroji
+COPY_SOURCE_FIELDS = True        # True = vytvori na cili sloupce ze zdroje (vc. taxonomy)
+COPY_SITE_ASSETS = True          # True = zkopiruje SiteAssets/Style Library (obrazky, bannery)
+COPY_WELCOME_PAGE = True         # True = nastavi domovskou stranku dle zdroje
+COPY_THEME = True                # True = prenese motiv (theme) webu ze zdroje na cil
+CREATE_MISSING_LISTS = True      # True = vytvori na cili seznamy/knihovny jen ze zdroje
+COPY_VIEWS = True                # True = prevezme zobrazeni (views) seznamu ze zdroje
+COPY_NAVIGATION = True           # True = prevezme navigaci (Quick Launch + horni menu)
+COPY_FILE_METADATA = True        # kopiruje hodnoty sloupcu dokumentu po nahrani
 
 SMALL_FILE_LIMIT = 2 * 1024 * 1024
 CHUNK_SIZE       = 8 * 1024 * 1024
@@ -66,6 +69,9 @@ SYSTEM_LIST_TITLES = {
     "Workflow Tasks", "TaxonomyHiddenList", "Cache Profiles",
     "Long Running Operation Status", "Maintenance Log Library",
 }
+
+# knihovny, ktere pri WIPE nemazeme jako celek (jen jejich obsah)
+WIPE_KEEP_LIBRARY_TITLES = {"Site Pages", "SitePages", "Documents", "Shared Documents"}
 
 LOG_FILE = "copy_log.txt"
 
@@ -232,7 +238,6 @@ def get_fields(sp, list_title):
             and not f["FromBaseType"]]
 
 
-# systemova/technicka pole, ktera se pri kopirovani DAT nikdy neprepisuji
 _DATA_SYSTEM_FIELDS = {
     "ContentType", "Attachments", "Author", "Editor", "Created", "Modified",
     "ID", "GUID", "FileLeafRef", "FileRef", "FileDirRef", "Order", "owshiddenversion",
@@ -241,8 +246,6 @@ _DATA_SYSTEM_FIELDS = {
 }
 
 def get_data_fields(sp, list_title):
-    """Sloupce pro KOPIROVANI DAT - VCETNE base-type poli (napr. Title!),
-    ale bez read-only a systemovych technicky poli."""
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
                "?$select=Title,InternalName,TypeAsString,ReadOnlyField,Hidden")
     r.raise_for_status()
@@ -256,6 +259,34 @@ def get_data_fields(sp, list_title):
     return out
 
 
+# ============================ WIPE CILE (uplne smazani) ====================
+
+def wipe_target(tgt):
+    log(f"\n{'='*70}\nWIPE CILE - mazu vse na {tgt.site}\n{'='*70}")
+    try:
+        lists = get_lists(tgt)
+    except Exception as e:
+        log(f"  !!! nelze nacist seznamy cile: {e}")
+        return
+    for lst in lists:
+        title = lst["Title"]
+        root = lst["RootFolder"]["ServerRelativeUrl"]
+        if is_site_pages_library(lst) or title in WIPE_KEEP_LIBRARY_TITLES:
+            log(f"  [WIPE-OBSAH] '{title}' (knihovnu ponechavam, mazu obsah)")
+            if lst["BaseType"] == 1:
+                clear_document_library(tgt, root)
+            else:
+                clear_generic_list(tgt, title)
+            continue
+        log(f"  [WIPE-SEZNAM] mazu cely '{title}'")
+        if DRY_RUN:
+            continue
+        resp = tgt.post(f"/_api/web/lists/getbytitle('{odata(title)}')",
+                        extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
+        if resp.status_code not in (200, 204):
+            log(f"    !!! chyba mazani seznamu '{title}': {resp.status_code} {resp.text[:200]}")
+
+
 # ============================ VYTVORENI CHYBEJICICH SEZNAMU ================
 
 def list_exists(tgt, list_title):
@@ -263,7 +294,6 @@ def list_exists(tgt, list_title):
     return r.status_code == 200
 
 def ensure_list_exists(src, tgt, lst):
-    """Vytvori seznam/knihovnu na cili dle zdroje, pokud tam neexistuje."""
     if not CREATE_MISSING_LISTS:
         return
     title = lst["Title"]
@@ -287,7 +317,6 @@ def ensure_list_exists(src, tgt, lst):
     if resp.status_code not in (200, 201):
         log(f"    !!! chyba vytvareni seznamu: {resp.status_code} {resp.text[:250]}")
         return
-    # zapni tvorbu slozek u knihoven, pokud ji ma zdroj
     if lst["BaseType"] == 1 and lst.get("EnableFolderCreation"):
         tgt.post(f"/_api/web/lists/getbytitle('{odata(title)}')",
                  extra_headers=tgt.write_headers(method_override="MERGE",
@@ -311,9 +340,20 @@ def _field_exists(tgt, list_title, internal):
                 f"/getbyinternalnameortitle('{odata(internal)}')?$select=InternalName")
     return r.status_code == 200
 
-def _create_field_from_xml(tgt, list_title, schema_xml, options):
+def _sanitize_schema_xml(schema_xml):
+    """Odstrani ze SchemaXml vazby na ZDROJ (ID, SourceID, Version, WebId, List),
+    aby CreateFieldAsXml na cili prideli NOVY GUID a nespadl na duplicate GUID."""
+    if not schema_xml:
+        return schema_xml
+    for attr in ("ID", "SourceID", "Version", "WebId", "List"):
+        schema_xml = re.sub(rf'\s{attr}="[^"]*"', "", schema_xml)
+        schema_xml = re.sub(rf"\s{attr}='[^']*'", "", schema_xml)
+    return schema_xml
+
+def _create_field_from_xml(tgt, list_title, schema_xml, options, sanitize=True):
+    xml = _sanitize_schema_xml(schema_xml) if sanitize else schema_xml
     body = {"parameters": {"__metadata": {"type": "SP.XmlSchemaFieldCreationInformation"},
-                           "SchemaXml": schema_xml, "Options": options}}
+                           "SchemaXml": xml, "Options": options}}
     return tgt.post(f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields/CreateFieldAsXml",
                     extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
                     data=json.dumps(body))
@@ -330,10 +370,12 @@ def copy_list_fields(src, tgt, list_title):
         return
     all_by_id = _all_source_fields_by_id(src, list_title)
     log(f"  Prevzeti sloupcu ze zdroje ({len(src_fields)} kandidatu):")
+    n_created = n_exists = n_err = 0
     for f in src_fields:
         internal, ftype, title = f["InternalName"], f["TypeAsString"], f["Title"]
         if _field_exists(tgt, list_title, internal):
             log(f"    [SLOUPEC] '{title}' ({internal}, {ftype}) - uz existuje, preskakuji")
+            n_exists += 1
             continue
         src_full = None
         if f.get("Id"):
@@ -346,6 +388,7 @@ def copy_list_fields(src, tgt, list_title):
         schema = src_full["SchemaXml"] if src_full else None
         if not schema:
             log(f"    [SLOUPEC] '{title}' - nelze precist SchemaXml, preskakuji")
+            n_err += 1
             continue
         is_tax = ftype in ("TaxonomyFieldType", "TaxonomyFieldTypeMulti")
         log(f"    [SLOUPEC] vytvarim '{title}' ({internal}, {ftype})" + (" [taxonomy]" if is_tax else ""))
@@ -356,26 +399,32 @@ def copy_list_fields(src, tgt, list_title):
             note_field = all_by_id.get(note_guid) if note_guid else None
             if note_field and note_field.get("SchemaXml"):
                 if not _field_exists(tgt, list_title, note_field["InternalName"]):
-                    rn = _create_field_from_xml(tgt, list_title, note_field["SchemaXml"], NOTE_FIELD_OPTIONS)
+                    rn = _create_field_from_xml(tgt, list_title, note_field["SchemaXml"],
+                                                NOTE_FIELD_OPTIONS, sanitize=False)
                     if rn.status_code not in (200, 201):
                         log(f"        !!! chyba Note sloupce: {rn.status_code} {rn.text[:200]}")
+                        n_err += 1
             else:
                 log(f"        (!) skryty Note sloupec pro '{title}' nenalezen")
-            rt = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS)
+            rt = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS, sanitize=False)
             if rt.status_code not in (200, 201):
                 log(f"        !!! chyba taxonomy sloupce: {rt.status_code} {rt.text[:250]}")
+                n_err += 1
+            else:
+                n_created += 1
         else:
-            r = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS)
+            r = _create_field_from_xml(tgt, list_title, schema, FIELD_OPTIONS, sanitize=True)
             if r.status_code not in (200, 201):
                 log(f"        !!! chyba sloupce: {r.status_code} {r.text[:250]}")
+                n_err += 1
+            else:
+                n_created += 1
+    log(f"  -> sloupce '{list_title}': vytvoreno {n_created}, existovalo {n_exists}, chyb {n_err}")
 
 
 # ============================ PREVZETI VIEWS (ZOBRAZENI) ====================
 
 def _get_view_fields(sp, list_title, vtitle):
-    """Natahne SEZNAM sloupcu (internal names) zobrazenych ve view.
-    ViewFields NELZE ziskat pres $select - je nutny dedikovany endpoint.
-    Struktura odpovedi (odata=verbose): d.Items.results = ['Title','Ano_x002f_ne',...]"""
     r = sp.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
                f"/getbytitle('{odata(vtitle)}')/viewfields")
     if r.status_code != 200:
@@ -385,7 +434,6 @@ def _get_view_fields(sp, list_title, vtitle):
         d = r.json()["d"]
     except Exception:
         return []
-    # robustne pro ruzne struktury
     items = d.get("Items")
     if isinstance(items, dict):
         res = items.get("results")
@@ -397,7 +445,6 @@ def _get_view_fields(sp, list_title, vtitle):
 
 
 def copy_views(src, tgt, list_title):
-    """Prevezme zobrazeni (views) seznamu ze zdroje vc. zobrazenych sloupcu (ViewFields)."""
     if not COPY_VIEWS:
         return
     r = src.get(f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
@@ -414,9 +461,7 @@ def copy_views(src, tgt, list_title):
     log(f"  Prevzeti views ({len(src_views)}):")
     for v in src_views:
         vtitle = v["Title"]
-        # zdrojove zobrazene sloupce (natazene zvlast)
         src_vf = _get_view_fields(src, list_title, vtitle)
-
         if vtitle in existing:
             log(f"    [VIEW] '{vtitle}' - aktualizuji dotaz + sloupce ({len(src_vf)})")
             if not DRY_RUN:
@@ -424,7 +469,6 @@ def copy_views(src, tgt, list_title):
                 if src_vf:
                     _set_view_fields(tgt, list_title, vtitle, src_vf)
             continue
-
         log(f"    [VIEW] vytvarim '{vtitle}'" + (" (vychozi)" if v.get("DefaultView") else "")
             + f" - sloupce: {len(src_vf)}")
         if DRY_RUN:
@@ -459,8 +503,6 @@ def _target_field_exists(tgt, list_title, internal):
     return r.status_code == 200
 
 def _set_view_fields(tgt, list_title, vtitle, fields):
-    """Nastavi zobrazene sloupce view: nejdriv smaze vse, pak prida ze zdroje.
-    Pouziva SPOLEHLIVEJSI variantu addviewfield s telem {'strField': ...}."""
     base = (f"/_api/web/lists/getbytitle('{odata(list_title)}')/views"
             f"/getbytitle('{odata(vtitle)}')/viewfields")
     rm = tgt.post(base + "/removeallviewfields", extra_headers=tgt.write_headers())
@@ -468,7 +510,6 @@ def _set_view_fields(tgt, list_title, vtitle, fields):
         log(f"        (!) removeallviewfields selhalo: {rm.status_code} {rm.text[:150]}")
     added, skipped = 0, 0
     for fn in fields:
-        # pridavej jen sloupce, ktere na cili realne existuji (jinak 400/500)
         if not _target_field_exists(tgt, list_title, fn):
             log(f"        (!) sloupec '{fn}' na cili neexistuje - preskakuji ve view")
             skipped += 1
@@ -479,7 +520,6 @@ def _set_view_fields(tgt, list_title, vtitle, fields):
         if r.status_code in (200, 204):
             added += 1
         else:
-            # fallback na URL variantu
             r2 = tgt.post(base + f"/addviewfield('{odata(fn)}')", extra_headers=tgt.write_headers())
             if r2.status_code in (200, 204):
                 added += 1
@@ -489,34 +529,121 @@ def _set_view_fields(tgt, list_title, vtitle, fields):
         + (f", preskoceno {skipped}" if skipped else ""))
 
 
+_SOURCE_WELCOME_PAGE = None
+
+# ============================ THEME (MOTIV WEBU) ===========================
+
+def copy_theme(src, tgt):
+    """Prenese motiv (theme) ze zdroje na cil. Bez motivu web party sice
+    existuji, ale renderuji se v defaultnich barvach -> 'ztraceny styl'.
+    Nejdriv zkusi presny nazev motivu (nametheming), pak fallback na
+    prime nahrani theme JSON (palette) pres ApplyTheme."""
+    if not COPY_THEME:
+        return
+    log(f"\n{'='*70}\nTHEME (motiv webu)\n{'='*70}")
+
+    # 1) Zjisti aktualni theme data zdroje
+    r = src.post("/_api/thememanager/GetCurrentThemeData",
+                 extra_headers=src.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                 data=json.dumps({}))
+    theme_name = None
+    palette = None
+    if r.status_code == 200:
+        try:
+            d = r.json()["d"]["GetCurrentThemeData"]
+            theme_name = d.get("name")
+            # palette muze byt v ruznych klicich podle tenantu
+            palette = d.get("palette") or d.get("Palette")
+            log(f"  [THEME] zdrojovy motiv: name='{theme_name}'")
+        except Exception as e:
+            log(f"  (!) nelze rozparsovat theme data: {e}")
+    else:
+        log(f"  (!) GetCurrentThemeData zdroje selhalo: {r.status_code}")
+
+    if DRY_RUN:
+        log("  (DRY_RUN - motiv se neaplikuje)")
+        return
+
+    # 2) Pokud mame pojmenovany (tenantni) motiv, aplikuj podle nazvu
+    if theme_name:
+        body = {"name": theme_name}
+        ap = tgt.post("/_api/thememanager/ApplyTheme",
+                      extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                      data=json.dumps(body))
+        if ap.status_code in (200, 204):
+            log(f"  [THEME] -> aplikovan pojmenovany motiv '{theme_name}' na cil")
+            return
+        log(f"  (i) ApplyTheme podle nazvu selhal ({ap.status_code}), zkousim palette JSON...")
+
+    # 3) Fallback: aplikuj primo paletu (theme JSON)
+    if palette:
+        try:
+            theme_json = json.dumps({"palette": palette})
+        except Exception:
+            theme_json = None
+        if theme_json:
+            body = {"name": theme_name or "CopiedTheme", "themeJson": theme_json}
+            ap = tgt.post("/_api/thememanager/ApplyTheme",
+                          extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                          data=json.dumps(body))
+            if ap.status_code in (200, 204):
+                log("  [THEME] -> aplikovana paleta motivu (themeJson) na cil")
+                return
+            log(f"  !!! ApplyTheme (palette) selhal: {ap.status_code} {ap.text[:250]}")
+    else:
+        log("  (!) Zdroj nevratil paletu motivu -> motiv nelze prenest automaticky.")
+        log("      -> Nastav rucne: Nastaveni > Zmenit vzhled > Motiv (stejny jako zdroj).")
+
+
 # ============================ NAVIGACE (Quick Launch + horni menu) ==========
 
+def _target_home_url():
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    welcome = (_SOURCE_WELCOME_PAGE or "SitePages/Home.aspx").lstrip("/")
+    return f"{target_path}/{welcome}"
+
 def _remap_url(u):
-    """Premapuje server-relative i absolutni URL ze zdroje na cil."""
+    """Premapuje URL zdroje na cil. Odkaz na koren zdroje VZDY smeruje na
+    skutecnou home.aspx cile. Krome absolutni i server-relativni varianty
+    premapuje take samotny nazev site (/sites/Zdroj -> /sites/TESTD), coz
+    zajisti spravne premapovani odkazu UVNITR web-partu (obrazky/quicklinks)."""
     if not u:
         return u
-    sp = SOURCE_SITE.split(".com", 1)[1]     # /sites/Test_A
-    tp = TARGET_SITE.split(".com", 1)[1]     # /sites/Project02
-    return u.replace(SOURCE_SITE, TARGET_SITE).replace(sp, tp)
 
+    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    raw = u.rstrip("/")
+
+    source_roots = {SOURCE_SITE.rstrip("/"), source_path}
+    if raw in source_roots:
+        return _target_home_url()
+
+    return u.replace(SOURCE_SITE, TARGET_SITE).replace(source_path, target_path)
+
+def _remap_in_content(text):
+    """Remapuje VSECHNY vyskyty zdrojove cesty v obsahu web-partu (canvas).
+    Diky tomu web party odkazujici na SiteAssets/obrazky zdroje ukazuji na
+    cil -> prenese se i jejich vizualni obsah (nejen rozlozeni)."""
+    if not isinstance(text, str) or not text:
+        return text
+    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
+    target_path = TARGET_SITE.split(".com", 1)[1].rstrip("/")
+    out = text.replace(SOURCE_SITE.rstrip("/"), TARGET_SITE.rstrip("/"))
+    out = out.replace(source_path, target_path)
+    return out
 
 def _is_system_nav_url(u):
-    """Systemove odkazy (Site contents, Recent, ...) - cil je ma vlastni, nekopirovat."""
     if not u:
         return False
     low = u.lower()
     return "/_layouts/" in low or "viewlsts.aspx" in low
 
-# Provideri pro MenuState (moderni navigace). Quick Launch = Current, horni = Global.
 _NAV_PROVIDERS = {
     "quicklaunch": "CurrentNavSiteMapProviderNoEncode",
     "topnavigationbar": "GlobalNavSiteMapProvider",
 }
 
 def _get_nav_nodes(sp, which):
-    """Precte navigaci. NEJDRIV zkusi MenuState (zachyti i moderni navigaci),
-    pak fallback na klasicky /navigation/{which}."""
-    # --- 1) MenuState provider ---
     provider = _NAV_PROVIDERS.get(which)
     if provider:
         r = sp.get(f"/_api/navigation/menustate?mapprovidername='{provider}'")
@@ -531,7 +658,6 @@ def _get_nav_nodes(sp, which):
                             "IsExternal": False,
                             "Children": [_conv(c) for c in n.get("Nodes", {}).get("results", [])]}
                 return [_conv(n) for n in nodes]
-    # --- 2) fallback: klasicky endpoint ---
     r = sp.get(f"/_api/web/navigation/{which}?$expand=Children")
     if r.status_code != 200:
         return []
@@ -551,8 +677,17 @@ def _clear_nav(tgt, which):
         tgt.post(f"/_api/web/navigation/{which}/getbyid({n['Id']})",
                  extra_headers=tgt.write_headers(method_override="DELETE", extra={"IF-MATCH": "*"}))
 
+def _looks_like_home(title, url):
+    t = (title or "").strip().lower()
+    if t in ("home", "domů", "domu", "úvod", "uvod", "start"):
+        return True
+    if not url:
+        return False
+    source_path = SOURCE_SITE.split(".com", 1)[1].rstrip("/")
+    raw = url.rstrip("/")
+    return raw in {SOURCE_SITE.rstrip("/"), source_path}
+
 def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
-    # systemove odkazy (_layouts, Site contents) preskoc - cil je ma vlastni
     if _is_system_nav_url(url):
         log(f"        (i) preskakuji systemovy nav uzel '{title}' ({url})")
         return None
@@ -562,10 +697,15 @@ def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
         endpoint = f"/_api/web/navigation/getnodebyid({parent_id})/children"
     else:
         endpoint = f"/_api/web/navigation/{which}"
-    remapped = _remap_url(url) or ""
-    # odkaz na zdrojovy web, ktery se nepremapoval -> oznac jako externi
-    src_path = SOURCE_SITE.split(".com", 1)[1]
-    still_external = bool(is_external) or (src_path in (url or "") and remapped == url)
+
+    if _looks_like_home(title, url):
+        remapped = _target_home_url()
+        still_external = False
+    else:
+        remapped = _remap_url(url) or ""
+        src_path = SOURCE_SITE.split(".com", 1)[1]
+        still_external = bool(is_external) or (src_path in (url or "") and remapped == url)
+
     body = {"__metadata": {"type": "SP.NavigationNode"},
             "Title": title, "Url": remapped, "IsExternal": still_external}
     try:
@@ -574,7 +714,6 @@ def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
                      data=json.dumps(body))
         if r.status_code in (200, 201):
             return r.json()["d"]["Id"]
-        # casta chyba: cilovy odkaz jeste neexistuje -> zaloz jako externi a preURL-uj
         if not still_external:
             body["IsExternal"] = True
             r2 = tgt.post(endpoint,
@@ -592,14 +731,24 @@ def _add_nav_node(tgt, which, title, url, is_external, parent_id=None):
 def copy_navigation(src, tgt):
     if not COPY_NAVIGATION:
         return
+
+    global _SOURCE_WELCOME_PAGE
+    rw = src.get("/_api/web/rootfolder?$select=WelcomePage")
+    if rw.status_code == 200:
+        _SOURCE_WELCOME_PAGE = rw.json()["d"].get("WelcomePage")
+        log(f"  [NAV HOME] zdrojova WelcomePage: {_SOURCE_WELCOME_PAGE or '(nenastavena)'}")
+    else:
+        log(f"  (!) WelcomePage pro navigaci nelze nacist: {rw.status_code}")
+
     log(f"\n{'='*70}\nNAVIGACE (Quick Launch + horni menu)\n{'='*70}")
+    log(f"  [NAV HOME] cilova home URL: {_target_home_url()}")
     for which, label in (("quicklaunch", "Quick Launch"), ("topnavigationbar", "Horni menu")):
         nodes = _get_nav_nodes(src, which)
         log(f"  [{label}] nalezeno {len(nodes)} uzlu na zdroji")
         for n in nodes:
-            log(f"    - {n['Title']} ({n['Url']})")
+            log(f"    - {n['Title']} ({n['Url']}) -> {_remap_url(n['Url'])}")
             for c in n.get("Children", []):
-                log(f"        - {c['Title']} ({c['Url']})")
+                log(f"        - {c['Title']} ({c['Url']}) -> {_remap_url(c['Url'])}")
         if DRY_RUN or not nodes:
             continue
         _clear_nav(tgt, which)
@@ -608,12 +757,14 @@ def copy_navigation(src, tgt):
             pid = _add_nav_node(tgt, which, n["Title"], n["Url"], n.get("IsExternal", False))
             if pid:
                 added += 1
+            if not pid and n.get("Children"):
+                log(f"        (!) rodic '{n['Title']}' nevznikl, jeho deti preskakuji")
+                continue
             for c in n.get("Children", []):
                 cid = _add_nav_node(tgt, which, c["Title"], c["Url"], c.get("IsExternal", False), parent_id=pid)
                 if cid:
                     added += 1
         log(f"  [{label}] -> nastaveno {added} uzlu na cili")
-
 
 # ============================ VYPIS OBSAHU ==========
 
@@ -743,17 +894,19 @@ def _upload_large(tgt, tgt_folder_url, file_name, content):
         tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{fu}')/FinishUpload(uploadId=guid'{upload_id}',fileOffset={offset})",
                  extra_headers=tgt.write_headers(), data=b"")
 
-def copy_file(src, tgt, src_file_url, tgt_folder_url, file_name):
+def copy_file(src, tgt, src_file_url, tgt_folder_url, file_name, list_title=None):
     log(f"    [SOUBOR] {file_name}  ->  {tgt_folder_url}")
     if has_unsupported_chars(file_name):
-        log(f"      (!) PRESKAKUJI - nazev obsahuje '%' nebo '#'.")
+        log("      (!) PRESKAKUJI - nazev obsahuje '%' nebo '#'.")
         return
     if DRY_RUN:
         return
+
     r = src.get(f"/_api/web/GetFileByServerRelativeUrl('{odata(src_file_url)}')/$value")
     if r.status_code != 200:
         log(f"      !!! chyba stazeni: {r.status_code}")
         return
+
     content = r.content
     if len(content) <= SMALL_FILE_LIMIT:
         _upload_small(tgt, tgt_folder_url, file_name, content)
@@ -761,12 +914,17 @@ def copy_file(src, tgt, src_file_url, tgt_folder_url, file_name):
         log(f"      (velky soubor {len(content)//1024//1024} MB -> chunked)")
         _upload_large(tgt, tgt_folder_url, file_name, content)
 
+    tgt_file_url = f"{tgt_folder_url}/{file_name}"
+    copy_file_metadata(src, tgt, src_file_url, tgt_file_url, list_title)
+
 def copy_library_recursive(src, tgt, src_folder_url, tgt_folder_url, list_title=None):
     r = src.get(f"/_api/web/GetFolderByServerRelativeUrl('{odata(src_folder_url)}')?$expand=Folders,Files")
     r.raise_for_status()
     data = r.json()["d"]
+
     for f in data.get("Files", {}).get("results", []):
-        copy_file(src, tgt, f["ServerRelativeUrl"], tgt_folder_url, f["Name"])
+        copy_file(src, tgt, f["ServerRelativeUrl"], tgt_folder_url, f["Name"], list_title)
+
     for sub in data.get("Folders", {}).get("results", []):
         name = sub["Name"]
         if name == "Forms":
@@ -782,6 +940,161 @@ def target_root_for(src_root_url):
     sp = SOURCE_SITE.split(".com", 1)[1]
     tp = TARGET_SITE.split(".com", 1)[1]
     return src_root_url.replace(sp, tp)
+
+
+
+# ============================ METADATA DOKUMENTU ===========================
+
+_target_writable_fields_cache = {}
+_source_fields_lookup_cache = {}
+
+_METADATA_SKIP_FIELDS = {
+    "ContentType", "Attachments", "Author", "Editor", "Created", "Modified",
+    "ID", "GUID", "UniqueId", "FileLeafRef", "FileRef", "FileDirRef",
+    "FSObjType", "Order", "owshiddenversion", "_UIVersionString",
+    "_ModerationStatus", "_Level", "AppAuthor", "AppEditor",
+    "ComplianceAssetId", "_ComplianceFlags", "_ComplianceTag",
+    "CheckoutUser", "File_x0020_Size", "DocIcon", "Edit", "SelectTitle",
+    "LinkFilename", "LinkFilenameNoMenu", "LinkTitle", "LinkTitleNoMenu",
+    "HTML_x0020_File_x0020_Type", "_CopySource", "_HasCopyDestinations",
+    "_SourceUrl", "_VirusStatus", "_VirusVendorID", "InstanceID",
+    "WorkflowVersion", "ParentVersionString", "ParentLeafName",
+}
+
+_METADATA_UNSUPPORTED_TYPES = {
+    "Computed", "Lookup", "LookupMulti", "User", "UserMulti",
+    "TaxonomyFieldType", "TaxonomyFieldTypeMulti",
+    "Attachments", "Threading", "Recurrence", "CrossProjectLink",
+}
+
+
+def _target_writable_fields(tgt, list_title):
+    key = (tgt.site, list_title)
+    if key in _target_writable_fields_cache:
+        return _target_writable_fields_cache[key]
+    r = tgt.get(
+        f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+        "?$select=Title,InternalName,TypeAsString,ReadOnlyField,Hidden"
+    )
+    if r.status_code != 200:
+        log(f"      (!) nelze nacist cilova pole pro metadata: {r.status_code}")
+        return {}
+    out = {}
+    for f in r.json()["d"]["results"]:
+        internal = f["InternalName"]
+        if f.get("ReadOnlyField") or f.get("Hidden"):
+            continue
+        if internal in _METADATA_SKIP_FIELDS:
+            continue
+        if f.get("TypeAsString") in _METADATA_UNSUPPORTED_TYPES:
+            continue
+        out[internal] = f
+    _target_writable_fields_cache[key] = out
+    return out
+
+
+def _source_fields_lookup(src, list_title):
+    key = (src.site, list_title)
+    if key in _source_fields_lookup_cache:
+        return _source_fields_lookup_cache[key]
+    by_internal, by_title = {}, {}
+    r = src.get(
+        f"/_api/web/lists/getbytitle('{odata(list_title)}')/fields"
+        "?$select=Title,InternalName,TypeAsString"
+    )
+    if r.status_code == 200:
+        for f in r.json()["d"]["results"]:
+            by_internal[f["InternalName"]] = f
+            by_title.setdefault(f["Title"].strip().lower(), f)
+    _source_fields_lookup_cache[key] = (by_internal, by_title)
+    return by_internal, by_title
+
+
+def _normalise_metadata_value(value, ftype):
+    if value is None:
+        return None
+    if ftype == "URL" and isinstance(value, dict):
+        return {
+            "__metadata": {"type": "SP.FieldUrlValue"},
+            "Url": _remap_url(value.get("Url", "")),
+            "Description": value.get("Description", "") or "",
+        }
+    if ftype in ("MultiChoice",) and isinstance(value, dict):
+        return {"__metadata": {"type": "Collection(Edm.String)"},
+                "results": value.get("results", [])}
+    if isinstance(value, dict) and "results" in value:
+        return value
+    return value
+
+
+def copy_file_metadata(src, tgt, src_file_url, tgt_file_url, list_title):
+    if not COPY_FILE_METADATA or not list_title:
+        return
+
+    rs = src.get(
+        f"/_api/web/GetFileByServerRelativeUrl('{odata(src_file_url)}')"
+        "/ListItemAllFields"
+    )
+    if rs.status_code != 200:
+        log(f"      (!) metadata zdroje nelze nacist: {rs.status_code}")
+        return
+
+    rt = tgt.get(
+        f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')"
+        "/ListItemAllFields?$select=Id"
+    )
+    if rt.status_code != 200:
+        log(f"      (!) cilovy ListItem dokumentu nelze nacist: {rt.status_code}")
+        return
+
+    src_item = rs.json()["d"]
+    target_fields = _target_writable_fields(tgt, list_title)
+    src_by_internal, src_by_title = _source_fields_lookup(src, list_title)
+    entity_type = get_entity_type_full_name(tgt, list_title)
+    values = {"__metadata": {"type": entity_type}}
+
+    copied = []
+    for internal, field in target_fields.items():
+        title = field.get("Title", internal)
+        src_internal = internal if internal in src_item else None
+        if src_internal is None:
+            alt = src_by_title.get(title.strip().lower())
+            if alt and alt["InternalName"] in src_item:
+                src_internal = alt["InternalName"]
+                log(f"        (i) '{title}': cilovy nazev '{internal}' != zdrojovy "
+                    f"'{src_internal}' - parovano podle Title")
+        if src_internal is None:
+            log(f"        (i) '{title}' ({internal}) - ve zdrojovych datech "
+                f"nenalezen odpovidajici sloupec, preskakuji")
+            continue
+        raw_value = src_item.get(src_internal)
+        if raw_value is None:
+            log(f"        (i) '{title}' ({internal}) - zdroj ma prazdnou "
+                f"hodnotu, preskakuji")
+            continue
+        value = _normalise_metadata_value(raw_value, field["TypeAsString"])
+        if value is None:
+            continue
+        values[internal] = value
+        copied.append(f"{title}={value!r}")
+
+    if len(values) == 1:
+        log("      (i) zadna kompatibilni metadata k zapisu (viz duvody vyse)")
+        return
+
+    item_id = rt.json()["d"]["Id"]
+    resp = tgt.post(
+        f"/_api/web/lists/getbytitle('{odata(list_title)}')/items({item_id})",
+        extra_headers=tgt.write_headers(
+            method_override="MERGE",
+            extra={"IF-MATCH": "*", "Content-Type": "application/json;odata=verbose"},
+        ),
+        data=json.dumps(values),
+    )
+    if resp.status_code in (200, 204):
+        log(f"      [METADATA] zapsano {len(copied)} poli: {', '.join(copied)}")
+    else:
+        log(f"      !!! chyba zapisu metadat: {resp.status_code} {resp.text[:400]}")
 
 
 # ============================ ASSET KNIHOVNY ====
@@ -815,18 +1128,55 @@ def copy_asset_library(src, tgt, path_suffix):
 
 # ============================ MODERNI STRANKY =====
 
-PAGE_FIELDS_TO_COPY = ["Title", "CanvasContent1", "LayoutWebpartsContent",
+PAGE_FIELDS_TO_COPY = ["Title", "WikiField", "CanvasContent1", "LayoutWebpartsContent",
                        "Description", "PromotedState", "PageLayoutType",
                        "ClientSideApplicationId", "_TopicHeader", "_SPSitePageFlags"]
 
-# GUID aplikace, ktera oznacuje stranku jako MODERNI (client-side). Bez nej
-# SharePoint stranku povazuje za klasickou a renderuje ji rozbite.
 MODERN_PAGE_APP_ID = "b6917cb1-93a0-4b97-a84d-7cf49975d4ec"
+
+def _save_modern_page_content(tgt, page_item_id, canvas, layout):
+    """Spolehlivy zapis obsahu moderni stranky pres publishing endpoint.
+    Prosty MERGE na CanvasContent1 casto vrati 204, ale obsah NEULOZI."""
+    tgt.post(f"/_api/SitePages/Pages({page_item_id})/CheckoutPage",
+             extra_headers=tgt.write_headers())
+    body = {"__metadata": {"type": "SP.Publishing.SitePage"}}
+    if canvas is not None:
+        body["CanvasContent1"] = canvas
+    if layout:
+        body["LayoutWebpartsContent"] = layout
+    r = tgt.post(f"/_api/SitePages/Pages({page_item_id})/SavePageAsDraft",
+                 extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}),
+                 data=json.dumps(body))
+    if r.status_code not in (200, 204):
+        log(f"      !!! SavePageAsDraft: {r.status_code} {r.text[:250]}")
+        return False
+    return True
+
+def _set_as_home_page(tgt, page_item_id, page_name):
+    """Nastavi stranku jako domovskou pres moderni endpoint SetAsHomePage.
+    KLICOVE: bez toho SharePoint drzi systemovou TopicHome.aspx i kdyz
+    WelcomePage ukazuje jinam. Timto se prenese uzivatelem zvolena home."""
+    r = tgt.post(f"/_api/SitePages/Pages({page_item_id})/SetAsHomePage",
+                 extra_headers=tgt.write_headers(extra={"Content-Type": "application/json;odata=verbose"}))
+    if r.status_code in (200, 204):
+        log(f"      [HOME] '{page_name}' nastavena jako domovska (SetAsHomePage)")
+        return True
+    log(f"      (!) SetAsHomePage selhal ({r.status_code}) - zkusim fallback WelcomePage")
+    return False
 
 def copy_site_pages_library(src, tgt, lst):
     title = lst["Title"]
     src_root = lst["RootFolder"]["ServerRelativeUrl"]
     tgt_root = target_root_for(src_root)
+
+    src_home_name = None
+    rw = src.get("/_api/web/rootfolder?$select=WelcomePage")
+    if rw.status_code == 200:
+        wp = rw.json()["d"].get("WelcomePage") or ""
+        if wp:
+            src_home_name = wp.rstrip("/").split("/")[-1].lower()
+    log(f"  [HOME] zdrojova domovska stranka: {src_home_name or '(nezjisteno)'}")
+
     if DELETE_TARGET_CONTENT:
         log(f"  Mazani obsahu cilove knihovny stranek: {tgt_root}")
         clear_document_library(tgt, tgt_root)
@@ -834,7 +1184,11 @@ def copy_site_pages_library(src, tgt, lst):
     r.raise_for_status()
     files = [f for f in r.json()["d"]["results"] if f["Name"].lower().endswith(".aspx")]
     log(f"  Nalezeno {len(files)} stranek ke zkopirovani")
-    entity_type = get_entity_type_full_name(src, title)
+    entity_type = get_entity_type_full_name(tgt, title)
+
+    home_item_id = None
+    home_page_name = None
+
     for f in files:
         name = f["Name"]
         log(f"    [STRANKA] {name}")
@@ -858,20 +1212,37 @@ def copy_site_pages_library(src, tgt, lst):
             log(f"      !!! nelze najit novou stranku: {r_new.status_code}")
             continue
         new_id = r_new.json()["d"]["Id"]
+
+        # --- detekce typu stranky ---
+        wiki = item.get("WikiField")
+        canvas = item.get("CanvasContent1")
+        is_classic = isinstance(wiki, str) and wiki.strip() != ""
+
+        # remap odkazu ze zdroje na cil (obrazky, SiteAssets, odkazy)
+        if isinstance(wiki, str):
+            wiki = _remap_in_content(wiki)
+        if isinstance(canvas, str):
+            canvas = _remap_in_content(canvas)
+
+        # MERGE vsech poli (u klasicke i moderni stranky). WikiField je
+        # klicovy - nese layout+styl klasicke stranky.
         values = {"__metadata": {"type": entity_type}}
         for field in PAGE_FIELDS_TO_COPY:
-            if item.get(field) is not None:
-                val = item[field]
-                # v obsahu stranky (canvas/layout) premapuj odkazy /sites/Test_A -> /sites/Project02
-                if field in ("CanvasContent1", "LayoutWebpartsContent") and isinstance(val, str):
-                    val = _remap_url(val)
-                values[field] = val
-        # KLICOVE: stranka musi byt oznacena jako MODERNI (client-side), jinak se
-        # renderuje rozbite. Nastav natvrdo, i kdyz zdroj vratil null.
-        values["ClientSideApplicationId"] = MODERN_PAGE_APP_ID
-        if not values.get("PageLayoutType"):
-            # Home.aspx -> "Home", ostatni -> "Article"
-            values["PageLayoutType"] = "Home" if name.lower() == "home.aspx" else "Article"
+            if item.get(field) is None:
+                continue
+            if field == "WikiField":
+                values["WikiField"] = wiki
+            elif field == "CanvasContent1":
+                values["CanvasContent1"] = canvas
+            elif field == "LayoutWebpartsContent" and isinstance(item[field], str):
+                values[field] = _remap_in_content(item[field])
+            else:
+                values[field] = item[field]
+        if not is_classic:
+            # moderni stranka -> oznac jako client-side
+            values["ClientSideApplicationId"] = MODERN_PAGE_APP_ID
+            if not values.get("PageLayoutType"):
+                values["PageLayoutType"] = "Home" if name.lower() == "home.aspx" else "Article"
         banner = item.get("BannerImageUrl")
         if isinstance(banner, dict) and banner.get("Url"):
             values["BannerImageUrl"] = {"__metadata": {"type": "SP.FieldUrlValue"},
@@ -885,25 +1256,32 @@ def copy_site_pages_library(src, tgt, lst):
         upd = _write_page(values)
         if upd.status_code not in (200, 204):
             log(f"      !!! chyba zapisu stranky: {upd.status_code} {upd.text[:300]}")
-        expected = values.get("CanvasContent1")
-        if expected:
-            for attempt in range(2):
-                chk = tgt.get(f"/_api/web/lists/getbytitle('{odata(title)}')/items({new_id})?$select=CanvasContent1")
-                got = chk.json()["d"].get("CanvasContent1") if chk.status_code == 200 else None
-                if got == expected:
-                    break
-                log(f"      (i) CanvasContent1 se neulozil - opakuji ({attempt+1})")
-                _write_page({"__metadata": {"type": entity_type},
-                             "CanvasContent1": expected,
-                             "LayoutWebpartsContent": values.get("LayoutWebpartsContent", "")})
-            else:
-                log(f"      !!! CanvasContent1 se nepodarilo ulozit (znamy REST limit).")
+        else:
+            log(f"      [OK] {'klasicka (WikiField)' if is_classic else 'moderni (canvas)'} stranka zapsana")
+
+        # SavePageAsDraft POUZE u moderni stranky (u klasicke jen hazi 500)
+        if not is_classic and (canvas is not None or values.get("LayoutWebpartsContent")):
+            ok = _save_modern_page_content(tgt, new_id, canvas, values.get("LayoutWebpartsContent", ""))
+            if not ok:
+                log(f"      (i) SavePageAsDraft selhal, ponechavam MERGE verzi.")
+
         tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/CheckIn(comment='Kopie',checkintype=1)",
                  extra_headers=tgt.write_headers())
         tgt.post(f"/_api/web/GetFileByServerRelativeUrl('{odata(tgt_file_url)}')/Publish('Kopie')",
                  extra_headers=tgt.write_headers())
-    if COPY_WELCOME_PAGE:
+
+        if src_home_name and name.lower() == src_home_name:
+            home_item_id, home_page_name = new_id, name
+
+    # domovska stranka: SetAsHomePage u klasickeho webu neexistuje (404),
+    # WelcomePage vyzaduje Full Control. Zkusime obe, jinak jasna hlaska.
+    if not DRY_RUN and home_item_id is not None:
+        ok = _set_as_home_page(tgt, home_item_id, home_page_name)
+        if not ok and COPY_WELCOME_PAGE:
+            set_welcome_page(src, tgt)
+    elif COPY_WELCOME_PAGE and not DRY_RUN:
         set_welcome_page(src, tgt)
+
 
 def set_welcome_page(src, tgt):
     r = src.get("/_api/web/rootfolder?$select=WelcomePage")
@@ -914,6 +1292,8 @@ def set_welcome_page(src, tgt):
     if not welcome:
         log(f"  (i) zdroj nema explicitni WelcomePage")
         return
+    global _SOURCE_WELCOME_PAGE
+    _SOURCE_WELCOME_PAGE = welcome
     log(f"  [DOMOVSKA STRANKA] WelcomePage = '{welcome}'")
     if DRY_RUN:
         return
@@ -923,8 +1303,7 @@ def set_welcome_page(src, tgt):
                     data=json.dumps({"__metadata": {"type": "SP.Folder"}, "WelcomePage": welcome}))
     if resp.status_code in (401, 403):
         log(f"    (i) WelcomePage nelze nastavit pres REST (chybi opravneni ManageWeb).")
-        log(f"        -> Nastav rucne: Nastaveni webu > vyber '{welcome}' jako domovskou stranku,")
-        log(f"           nebo v knihovne Site Pages u stranky '...->Make homepage'.")
+        log(f"        -> Nastav rucne: v knihovne Site Pages u stranky '{welcome}' zvol '...-> Make homepage'.")
     elif resp.status_code not in (200, 204):
         log(f"    !!! chyba WelcomePage: {resp.status_code} {resp.text[:250]}")
 
@@ -935,7 +1314,7 @@ SKIP_FIELD_TYPES = {"User", "UserMulti", "Lookup", "LookupMulti",
                     "TaxonomyFieldType", "TaxonomyFieldTypeMulti"}
 
 def copy_generic_list_items(src, tgt, list_title):
-    fields = get_data_fields(src, list_title)   # VCETNE Title a dalsich base-type poli
+    fields = get_data_fields(src, list_title)
     skipped = [f["Title"] for f in fields if f["TypeAsString"] in SKIP_FIELD_TYPES]
     if skipped:
         log(f"    (!) Preskakuji nepodporovane sloupce: {skipped}")
@@ -943,7 +1322,7 @@ def copy_generic_list_items(src, tgt, list_title):
     r.raise_for_status()
     items = r.json()["d"]["results"]
     log(f"    Nalezeno {len(items)} polozek ke kopirovani")
-    entity_type = get_entity_type_full_name(tgt, list_title)   # entity type CILE (kam zapisujeme)
+    entity_type = get_entity_type_full_name(tgt, list_title)
     for item in items:
         values = {"__metadata": {"type": entity_type}}
         for field in fields:
@@ -1147,16 +1526,17 @@ def set_folder_ksu(tgt, list_title, folder_server_relative_url):
 
 def main():
     log("=" * 70)
-    log(f"START   DRY_RUN={DRY_RUN}   DELETE_TARGET_CONTENT={DELETE_TARGET_CONTENT}")
+    log(f"START   DRY_RUN={DRY_RUN}   WIPE_TARGET={WIPE_TARGET}   "
+        f"DELETE_TARGET_CONTENT={DELETE_TARGET_CONTENT}")
     log(f"        CREATE_MISSING_LISTS={CREATE_MISSING_LISTS}  COPY_VIEWS={COPY_VIEWS}  "
-        f"COPY_NAVIGATION={COPY_NAVIGATION}  COPY_SITE_ASSETS={COPY_SITE_ASSETS}")
+        f"COPY_NAVIGATION={COPY_NAVIGATION}  COPY_SITE_ASSETS={COPY_SITE_ASSETS}  COPY_THEME={COPY_THEME}")
     log(f"Zdroj: {SOURCE_SITE}")
     log(f"Cil:   {TARGET_SITE}")
     log("=" * 70)
 
     src = SPSession(SOURCE_SITE, SOURCE_COOKIE_FILE)
     tgt = SPSession(TARGET_SITE, TARGET_COOKIE_FILE)
-    global _SRC_SESSION
+    global _SRC_SESSION, _SOURCE_WELCOME_PAGE
     _SRC_SESSION = src
 
     for name, sp in (("ZDROJ", src), ("CIL", tgt)):
@@ -1166,6 +1546,15 @@ def main():
         else:
             log(f"[{name}] !!! Pripojeni selhalo: {r.status_code} {r.text[:200]}")
             return
+
+    rw = src.get("/_api/web/rootfolder?$select=WelcomePage")
+    if rw.status_code == 200:
+        _SOURCE_WELCOME_PAGE = rw.json()["d"].get("WelcomePage")
+    log(f"Zdrojova WelcomePage: {_SOURCE_WELCOME_PAGE or '(nenastavena)'}")
+
+    # 0) WIPE cile - vse se vytvori uplne znovu
+    if WIPE_TARGET:
+        wipe_target(tgt)
 
     lists = get_lists(src)
     log(f"\nNalezeno {len(lists)} seznamu/knihoven:\n")
@@ -1180,7 +1569,10 @@ def main():
             log(f"\n--- {lst['Title']} ---")
             print_list_contents(src, lst)
 
-    # 0) asset knihovny (obrazky/bannery) - nejdriv
+    # 0b) MOTIV (theme) - jeste pred strankami, aby web party dedily spravny styl
+    copy_theme(src, tgt)
+
+    # 0c) asset knihovny (obrazky/bannery)
     if COPY_SITE_ASSETS:
         copy_asset_library(src, tgt, "/SiteAssets")
         copy_asset_library(src, tgt, "/Style Library")
@@ -1189,38 +1581,26 @@ def main():
         title = lst["Title"]
         log(f"\n{'='*70}\nZPRACOVAVAM: {title}\n{'='*70}")
 
-        # 1) vytvor seznam na cili, pokud chybi
         ensure_list_exists(src, tgt, lst)
-
-        # 2) prevezmi sloupce
         copy_list_fields(src, tgt, title)
-
-        # 3) prevezmi views
         copy_views(src, tgt, title)
 
-        # 4) obsah
         if is_site_pages_library(lst):
             copy_site_pages_library(src, tgt, lst)
         elif lst["BaseType"] == 1:
             src_root = lst["RootFolder"]["ServerRelativeUrl"]
             tgt_root = target_root_for(src_root)
-            if DELETE_TARGET_CONTENT:
-                log(f"  Mazani obsahu cilove knihovny: {tgt_root}")
-                clear_document_library(tgt, tgt_root)
             log(f"  Kopirovani souboru: {src_root} -> {tgt_root}")
             copy_library_recursive(src, tgt, src_root, tgt_root, title)
         else:
-            if DELETE_TARGET_CONTENT:
-                log(f"  Mazani polozek ciloveho seznamu: {title}")
-                clear_generic_list(tgt, title)
             log(f"  Kopirovani polozek seznamu: {title}")
             copy_generic_list_items(src, tgt, title)
 
-    # 5) navigace (Quick Launch + horni menu) - na zaver
+    # 5) navigace (Quick Launch + horni menu) - na zaver (Home -> home.aspx)
     copy_navigation(src, tgt)
 
     log("\n" + "=" * 70)
-    log("HOTOVO" + ("  (DRY RUN - nic se nezapsalo)" if DRY_RUN else ""))
+    log("HOTOVO" + ("  (DRY RUN - nic se nezapsalo ani nesmazalo)" if DRY_RUN else ""))
     log("=" * 70)
     save_log()
 
