@@ -88,8 +88,10 @@ Poté:
 
 # Instalace závislostí
 
+S průchodem přes proxy server ve Škoda auto
+
 ```powershell
-pip install requests
+pip install requests --proxy http://proxy.mb.skoda.vwg:8080
 ```
 
 Kontrola:
