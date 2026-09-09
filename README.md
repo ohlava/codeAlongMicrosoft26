@@ -1,4 +1,4 @@
-# Automatic SharePoint Sites — tým 7 (EOZ)
+# Automatic SharePoint Sites — tým 7 (E0Z)
 
 Automatizované zakládání a správa projektových SharePointových webů ze šablon
 verzovaných v tomto repozitáři, včetně přechodů mezi fázemi projektu a archivace.
