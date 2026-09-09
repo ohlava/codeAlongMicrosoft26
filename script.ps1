@@ -11,6 +11,20 @@ $TargetPath = "/sites/Project03"
 
 $SetOfflineAvailable = "nein" #ja
 
+# Governance / compliance controls for template cloning.
+# Empty arrays mean "copy all approved content". Add only the exact list names or list URLs required by internal Skoda/VW governance rules.
+# Examples:
+#   $AllowedListNames = @("Dokumenty","ContractTemplates")
+#   $AllowedListUrls = @("/sites/Project01/Lists/ContractTemplates")
+#   $ExcludedListNames = @("Tasks","Calendar")
+$AllowedListNames = @()     # If empty => no name-based restriction
+$AllowedListUrls = @()      # If empty => no URL-based restriction
+$ExcludedListNames = @()    # Use to block known non-template content
+$EnableFolderRestrictions = $false
+$AllowedFolderPrefixes = @() # Example: @("/sites/Project01/Shared Documents", "/sites/Project01/Lists/ContractTemplates")
+$RetentionDays = 0          # 0 = no retention enforcement logic in this script; set >0 if internal policy requires it
+$RetentionPolicyMode = "warn" # "warn", "enforce", "none"
+
 ##Copy SC > Subweb, Subweb > Subweb, Subweb > SC
 #Set '$true' if you want to copy from SiteCollection to SubWeb. Set '$false' if you want to copy from SubWeb to SiteCollection
 #Default = $false
@@ -37,6 +51,13 @@ $IsCopyPages = $true;
 $IsCopyTemplateDesign = $true;
 $IsCopyRegionalSettings = $true;
 $IsCopyNavigation = $true;
+
+# Demo data pro evidenci verze šablony.
+# V reálném nasazení je vhodné nastavovat přes interní číslování šablon a fázi lifecycle.
+$TemplateVersion = "1.3.0-demo"
+$TemplatePhase = "Archivace"
+$TemplateChangedBy = "demo.user@skoda-demo.local"
+$TemplateVersionLogListName = "TemplateVersionLog"
 
 try {
 
@@ -414,6 +435,41 @@ Write-Host "###List Copied Successfully!" -ForegroundColor Green
 }
 
 $global:TablesCurrent = @()
+Function Test-CloneAllowedList {
+    param(
+        [string]$ListTitle,
+        [string]$ListUrl
+    )
+
+    if ($ExcludedListNames -contains $ListTitle) {
+        return $false
+    }
+
+    if ($AllowedListNames.Count -gt 0 -and $AllowedListNames -notcontains $ListTitle) {
+        return $false
+    }
+
+    if ($AllowedListUrls.Count -gt 0 -and $AllowedListUrls -notcontains $ListUrl) {
+        return $false
+    }
+
+    if ($EnableFolderRestrictions -eq $true -and $AllowedFolderPrefixes.Count -gt 0) {
+        $isAllowedByFolder = $false
+        foreach ($prefix in $AllowedFolderPrefixes) {
+            if ($ListUrl -like "$prefix*") {
+                $isAllowedByFolder = $true
+                break
+            }
+        }
+
+        if (-not $isAllowedByFolder) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 Function Start-Copy($Site) {
 
 $global:Con2 = Connect-PnPOnline -Url $Site  -Interactive -ClientId $ClientId  -WarningAction Ignore
@@ -428,6 +484,10 @@ If (Test-Path $FolderPath) {
 $newPath = New-Item -Path $folderPath -ItemType Directory
 
 $AllLists = Get-PnPList -Connection $Con1 | Where-Object { $_.Hidden -eq $false -and $_.RootFolder.ServerRelativeUrl -like "$SourcePath/lists/*" }
+
+if ($AllLists) {
+    $AllLists = $AllLists | Where-Object { Test-CloneAllowedList -ListTitle $_.Title -ListUrl $_.RootFolder.ServerRelativeUrl }
+}
 
 Write-Host "----check Dependencies" 
 
@@ -819,6 +879,14 @@ if($IsCopyTemplateDesign -eq $true){
 
     $set = Invoke-PnPSiteTemplate -Path $filePathToTask -Connection $global:Con2
 
+    # Po aplikaci šablony uložíme její verzi do property bag webu.
+    # Ukládáme demo verzi, aby bylo možné z webu snadno ověřit, která šablona byla nasazena.
+    Set-TemplateVersionOnWeb -WebUrl $TargetSiteUrl -Version $TemplateVersion
+
+    # Pro audit a historii uložíme stejnou informaci i do seznamu TemplateVersionLog.
+    # Jde o jednoduchou evidenci změn pro demo prostředí i pro další kontrolu nasazení.
+    Add-TemplateVersionLogEntry -SiteUrl $TargetSiteUrl -TemplateVersionValue $TemplateVersion -Phase $TemplatePhase -ChangedBy $TemplateChangedBy
+
     #set HeaderLayout
     $Web = Get-PnPWeb -Connection $Con1
 
@@ -832,6 +900,9 @@ if($IsCopyTemplateDesign -eq $true){
 if($IsCopyRegionalSettings -eq $true){
     Copy-Regionalsettings
 }
+
+# Vytištění aktuální verze šablony po aplikaci.
+Get-TemplateVersionFromWeb -WebUrl $TargetSiteUrl
 
 }
 
@@ -919,6 +990,132 @@ if((($SourceNav.Title -ne "Notebook") -and ($SourceNav.Title -ne "Notizbuch")) -
 
 }
 
+Function Set-TemplateVersionOnWeb {
+    param(
+        [string]$WebUrl,
+        [string]$Version
+    )
+
+    # Zápis verze šablony do property bag webu pod klíčem "TemplateVersion".
+    # Tím lze na webu jednoduše dohledat, jaká verze šablony byla v daném okamžiku nasazena.
+    try {
+        $TargetWeb = Get-PnPWeb -Connection $global:Con2
+        $CurrentValue = Get-PnPPropertyBagValue -Key "TemplateVersion" -Web $TargetWeb -Connection $global:Con2
+
+        if ($CurrentValue) {
+            Write-Host "Předchozí verze šablony na webu: $CurrentValue" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "Na webu zatím není založená žádná verze šablony." -ForegroundColor DarkGray
+        }
+
+        Set-PnPPropertyBagValue -Key "TemplateVersion" -Value $Version -Web $TargetWeb -Connection $global:Con2
+        Write-Host "Verze šablony uložena do property bag webu: $Version" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Chyba při zápisu verze šablony do property bag webu: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Function Ensure-TemplateVersionLogList {
+    param(
+        [string]$ListName
+    )
+
+    # Pokud neexistuje logovací seznam pro verzi šablony, vytvoříme ho automaticky.
+    # Seznam obsahuje demo sloupce pro evidenci nasazení na webu.
+    try {
+        $ExistingList = Get-PnPList -Identity $ListName -Connection $global:Con2 -ErrorAction SilentlyContinue
+
+        if ($null -eq $ExistingList) {
+            Write-Host "Vytvářím seznam '$ListName' pro logování verzí šablon..." -ForegroundColor Yellow
+            $ExistingList = New-PnPList -Title $ListName -Template GenericList -Connection $global:Con2
+        }
+
+        $RequiredFields = @(
+            @{ Name = "SiteUrl"; Type = "Text"; DisplayName = "SiteUrl" },
+            @{ Name = "TemplateVersion"; Type = "Text"; DisplayName = "TemplateVersion" },
+            @{ Name = "Phase"; Type = "Text"; DisplayName = "Phase" },
+            @{ Name = "ChangedBy"; Type = "Text"; DisplayName = "ChangedBy" },
+            @{ Name = "ChangedOn"; Type = "DateTime"; DisplayName = "ChangedOn" }
+        )
+
+        foreach ($Field in $RequiredFields) {
+            $ExistingField = Get-PnPField -List $ExistingList -Connection $global:Con2 | Where-Object { $_.InternalName -eq $Field.Name -or $_.Title -eq $Field.DisplayName }
+
+            if ($null -eq $ExistingField) {
+                Write-Host "Přidávám sloupec '$($Field.DisplayName)' do seznamu '$ListName'." -ForegroundColor DarkGray
+                Add-PnPField -List $ExistingList -DisplayName $Field.DisplayName -InternalName $Field.Name -Type $Field.Type -Connection $global:Con2 | Out-Null
+            }
+        }
+
+        return $ExistingList
+    }
+    catch {
+        Write-Host "Chyba při vytváření nebo úpravě seznamu '$ListName': $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+Function Add-TemplateVersionLogEntry {
+    param(
+        [string]$SiteUrl,
+        [string]$TemplateVersionValue,
+        [string]$Phase,
+        [string]$ChangedBy
+    )
+
+    # Zápis do logovacího seznamu pro evidenci změn v nasazených šablonách.
+    # V demo datu používáme smyšlené hodnoty a času, aby byl zápis přehledný i pro netechnické kolegy.
+    try {
+        $LogList = Ensure-TemplateVersionLogList -ListName $TemplateVersionLogListName
+
+        if ($null -eq $LogList) {
+            Write-Host "Logovací seznam nebyl vytvořen, záznam se nezapíše." -ForegroundColor Yellow
+            return
+        }
+
+        $CurrentDate = Get-Date
+        $Values = @{
+            "SiteUrl" = $SiteUrl
+            "TemplateVersion" = $TemplateVersionValue
+            "Phase" = $Phase
+            "ChangedBy" = $ChangedBy
+            "ChangedOn" = $CurrentDate
+        }
+
+        Add-PnPListItem -List $LogList.Title -Values $Values -Connection $global:Con2 | Out-Null
+        Write-Host "Záznam o verzi šablony byl uložen do seznamu '$($LogList.Title)' pro web '$SiteUrl'." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Chyba při zápisu do seznamu '$TemplateVersionLogListName': $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Function Get-TemplateVersionFromWeb {
+    param(
+        [string]$WebUrl
+    )
+
+    # Funkce pro rychlé zjištění, jaká verze šablony je aktuálně nasazená na daném webu.
+    try {
+        $TargetWeb = Get-PnPWeb -Connection $global:Con2
+        $CurrentVersion = Get-PnPPropertyBagValue -Key "TemplateVersion" -Web $TargetWeb -Connection $global:Con2
+
+        if ($CurrentVersion) {
+            Write-Host "Nasalena verze šablony na webu: $CurrentVersion" -ForegroundColor Green
+            return $CurrentVersion
+        }
+
+        Write-Host "Na webu není v property bag nastavena žádná verze šablony." -ForegroundColor Yellow
+        return $null
+    }
+    catch {
+        Write-Host "Chyba při čtení verze šablony z property bag webu: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
 Function Copy-Regionalsettings {
 
 $filePathSettings = "$LocalFolder\settings.txt";
@@ -970,6 +1167,15 @@ Clear-Host
 if($IsDevMode){
 Set-Culture -CultureInfo en-US
 #$ErrorActionPreference = "SilentlyContinue"
+}
+
+if ($RetentionDays -gt 0) {
+    if ($RetentionPolicyMode -eq "warn") {
+        Write-Host "Retention check active: target lists must be reviewed for a $RetentionDays day retention policy before cloning. This script does not change legal retention settings automatically." -ForegroundColor Yellow
+    }
+    elseif ($RetentionPolicyMode -eq "enforce") {
+        Write-Host "Retention enforcement mode enabled: cloning will only proceed after the target list owners confirm a $RetentionDays day retention policy is in place." -ForegroundColor Yellow
+    }
 }
 
 if($CopyFromList){
