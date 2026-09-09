@@ -11,6 +11,20 @@ $TargetPath = "/sites/Project03"
 
 $SetOfflineAvailable = "nein" #ja
 
+# Governance / compliance controls for template cloning.
+# Empty arrays mean "copy all approved content". Add only the exact list names or list URLs required by internal Skoda/VW governance rules.
+# Examples:
+#   $AllowedListNames = @("Dokumenty","ContractTemplates")
+#   $AllowedListUrls = @("/sites/Project01/Lists/ContractTemplates")
+#   $ExcludedListNames = @("Tasks","Calendar")
+$AllowedListNames = @()     # If empty => no name-based restriction
+$AllowedListUrls = @()      # If empty => no URL-based restriction
+$ExcludedListNames = @()    # Use to block known non-template content
+$EnableFolderRestrictions = $false
+$AllowedFolderPrefixes = @() # Example: @("/sites/Project01/Shared Documents", "/sites/Project01/Lists/ContractTemplates")
+$RetentionDays = 0          # 0 = no retention enforcement logic in this script; set >0 if internal policy requires it
+$RetentionPolicyMode = "warn" # "warn", "enforce", "none"
+
 ##Copy SC > Subweb, Subweb > Subweb, Subweb > SC
 #Set '$true' if you want to copy from SiteCollection to SubWeb. Set '$false' if you want to copy from SubWeb to SiteCollection
 #Default = $false
@@ -414,6 +428,41 @@ Write-Host "###List Copied Successfully!" -ForegroundColor Green
 }
 
 $global:TablesCurrent = @()
+Function Test-CloneAllowedList {
+    param(
+        [string]$ListTitle,
+        [string]$ListUrl
+    )
+
+    if ($ExcludedListNames -contains $ListTitle) {
+        return $false
+    }
+
+    if ($AllowedListNames.Count -gt 0 -and $AllowedListNames -notcontains $ListTitle) {
+        return $false
+    }
+
+    if ($AllowedListUrls.Count -gt 0 -and $AllowedListUrls -notcontains $ListUrl) {
+        return $false
+    }
+
+    if ($EnableFolderRestrictions -eq $true -and $AllowedFolderPrefixes.Count -gt 0) {
+        $isAllowedByFolder = $false
+        foreach ($prefix in $AllowedFolderPrefixes) {
+            if ($ListUrl -like "$prefix*") {
+                $isAllowedByFolder = $true
+                break
+            }
+        }
+
+        if (-not $isAllowedByFolder) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 Function Start-Copy($Site) {
 
 $global:Con2 = Connect-PnPOnline -Url $Site  -Interactive -ClientId $ClientId  -WarningAction Ignore
@@ -428,6 +477,10 @@ If (Test-Path $FolderPath) {
 $newPath = New-Item -Path $folderPath -ItemType Directory
 
 $AllLists = Get-PnPList -Connection $Con1 | Where-Object { $_.Hidden -eq $false -and $_.RootFolder.ServerRelativeUrl -like "$SourcePath/lists/*" }
+
+if ($AllLists) {
+    $AllLists = $AllLists | Where-Object { Test-CloneAllowedList -ListTitle $_.Title -ListUrl $_.RootFolder.ServerRelativeUrl }
+}
 
 Write-Host "----check Dependencies" 
 
@@ -970,6 +1023,15 @@ Clear-Host
 if($IsDevMode){
 Set-Culture -CultureInfo en-US
 #$ErrorActionPreference = "SilentlyContinue"
+}
+
+if ($RetentionDays -gt 0) {
+    if ($RetentionPolicyMode -eq "warn") {
+        Write-Host "Retention check active: target lists must be reviewed for a $RetentionDays day retention policy before cloning. This script does not change legal retention settings automatically." -ForegroundColor Yellow
+    }
+    elseif ($RetentionPolicyMode -eq "enforce") {
+        Write-Host "Retention enforcement mode enabled: cloning will only proceed after the target list owners confirm a $RetentionDays day retention policy is in place." -ForegroundColor Yellow
+    }
 }
 
 if($CopyFromList){
