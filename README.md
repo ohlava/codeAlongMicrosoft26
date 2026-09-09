@@ -325,6 +325,6 @@ python copy_site.py
 
 # V sharepointu
 
-Je potřeba nastavit v sharepointu ručně motiv
+Je potřeba nastavit v sharepointu ručně motiv, aby seděly barvy
 
 ⚙️ Nastavení → Změnit vzhled → Motiv → Škoda light
