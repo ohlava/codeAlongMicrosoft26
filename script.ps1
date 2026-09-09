@@ -52,9 +52,12 @@ $IsCopyTemplateDesign = $true;
 $IsCopyRegionalSettings = $true;
 $IsCopyNavigation = $true;
 
-# Demo verze šablony pro evidenci v property bag webu.
-# V reálném nasazení je vhodné nastavovat přes interní číslování šablon.
+# Demo data pro evidenci verze šablony.
+# V reálném nasazení je vhodné nastavovat přes interní číslování šablon a fázi lifecycle.
 $TemplateVersion = "1.3.0-demo"
+$TemplatePhase = "Archivace"
+$TemplateChangedBy = "demo.user@skoda-demo.local"
+$TemplateVersionLogListName = "TemplateVersionLog"
 
 try {
 
@@ -880,6 +883,10 @@ if($IsCopyTemplateDesign -eq $true){
     # Ukládáme demo verzi, aby bylo možné z webu snadno ověřit, která šablona byla nasazena.
     Set-TemplateVersionOnWeb -WebUrl $TargetSiteUrl -Version $TemplateVersion
 
+    # Pro audit a historii uložíme stejnou informaci i do seznamu TemplateVersionLog.
+    # Jde o jednoduchou evidenci změn pro demo prostředí i pro další kontrolu nasazení.
+    Add-TemplateVersionLogEntry -SiteUrl $TargetSiteUrl -TemplateVersionValue $TemplateVersion -Phase $TemplatePhase -ChangedBy $TemplateChangedBy
+
     #set HeaderLayout
     $Web = Get-PnPWeb -Connection $Con1
 
@@ -1007,6 +1014,81 @@ Function Set-TemplateVersionOnWeb {
     }
     catch {
         Write-Host "Chyba při zápisu verze šablony do property bag webu: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Function Ensure-TemplateVersionLogList {
+    param(
+        [string]$ListName
+    )
+
+    # Pokud neexistuje logovací seznam pro verzi šablony, vytvoříme ho automaticky.
+    # Seznam obsahuje demo sloupce pro evidenci nasazení na webu.
+    try {
+        $ExistingList = Get-PnPList -Identity $ListName -Connection $global:Con2 -ErrorAction SilentlyContinue
+
+        if ($null -eq $ExistingList) {
+            Write-Host "Vytvářím seznam '$ListName' pro logování verzí šablon..." -ForegroundColor Yellow
+            $ExistingList = New-PnPList -Title $ListName -Template GenericList -Connection $global:Con2
+        }
+
+        $RequiredFields = @(
+            @{ Name = "SiteUrl"; Type = "Text"; DisplayName = "SiteUrl" },
+            @{ Name = "TemplateVersion"; Type = "Text"; DisplayName = "TemplateVersion" },
+            @{ Name = "Phase"; Type = "Text"; DisplayName = "Phase" },
+            @{ Name = "ChangedBy"; Type = "Text"; DisplayName = "ChangedBy" },
+            @{ Name = "ChangedOn"; Type = "DateTime"; DisplayName = "ChangedOn" }
+        )
+
+        foreach ($Field in $RequiredFields) {
+            $ExistingField = Get-PnPField -List $ExistingList -Connection $global:Con2 | Where-Object { $_.InternalName -eq $Field.Name -or $_.Title -eq $Field.DisplayName }
+
+            if ($null -eq $ExistingField) {
+                Write-Host "Přidávám sloupec '$($Field.DisplayName)' do seznamu '$ListName'." -ForegroundColor DarkGray
+                Add-PnPField -List $ExistingList -DisplayName $Field.DisplayName -InternalName $Field.Name -Type $Field.Type -Connection $global:Con2 | Out-Null
+            }
+        }
+
+        return $ExistingList
+    }
+    catch {
+        Write-Host "Chyba při vytváření nebo úpravě seznamu '$ListName': $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+Function Add-TemplateVersionLogEntry {
+    param(
+        [string]$SiteUrl,
+        [string]$TemplateVersionValue,
+        [string]$Phase,
+        [string]$ChangedBy
+    )
+
+    # Zápis do logovacího seznamu pro evidenci změn v nasazených šablonách.
+    # V demo datu používáme smyšlené hodnoty a času, aby byl zápis přehledný i pro netechnické kolegy.
+    try {
+        $LogList = Ensure-TemplateVersionLogList -ListName $TemplateVersionLogListName
+
+        if ($null -eq $LogList) {
+            Write-Host "Logovací seznam nebyl vytvořen, záznam se nezapíše." -ForegroundColor Yellow
+            return
+        }
+
+        $CurrentDate = Get-Date
+        $Values = @{
+            "SiteUrl" = $SiteUrl
+            "TemplateVersion" = $TemplateVersionValue
+            "Phase" = $Phase
+            "ChangedBy" = $ChangedBy
+            "ChangedOn" = $CurrentDate
+        }
+
+        Add-PnPListItem -List $LogList.Title -Values $Values -Connection $global:Con2 | Out-Null
+        Write-Host "Záznam o verzi šablony byl uložen do seznamu '$($LogList.Title)' pro web '$SiteUrl'." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Chyba při zápisu do seznamu '$TemplateVersionLogListName': $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
