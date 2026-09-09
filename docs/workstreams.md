@@ -11,6 +11,7 @@ nebo odkládáte práci.
 | **Vstupní bod pro byznys** | `src/Setup-ProjectSite.ps1`, `config/` | Ondřej Hlava | `feature/setup-project-site` | draft, neotestováno |
 | Seznamy a kalendáře | `src/Copy-SharePoint{Lists,Events}.ps1` | Sergiu Nica | `copy-listContent` | funguje |
 | Struktura složek z Excelu | `src/New-FolderStructure.ps1` | Ondřej Hlava | — | funguje, testováno |
+| Stránky, vzhled, regionální nastavení | `src/Copy-SitePages.ps1` | Ondřej Hlava | `feature/setup-project-site` | draft, neotestováno |
 | Kopírování navigace | `src/Copy-SiteNavigation.ps1` | Ondřej Hlava | — | draft, neotestováno |
 | Kopírování knihoven ze vzoru | `script.ps1` (`Copy-PnPDocLibs`) | Sergiu Nica | `add-library-copy-function-with-folder-structure` | rozpracováno |
 | Schéma šablony | `templates/`, `schema/` | — | — | draft |

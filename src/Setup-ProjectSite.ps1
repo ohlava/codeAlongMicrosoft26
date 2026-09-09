@@ -9,6 +9,7 @@
       New-FolderStructure.ps1     složky z Excelu + metadata
       Copy-SharePointLists.ps1    seznamy ze vzorového webu
       Copy-SharePointEvents.ps1   kalendáře (Events) ze vzorového webu
+      Copy-SitePages.ps1          stránky, obrázky, vzhled, regionální nastavení
       Copy-SiteNavigation.ps1     navigace (volitelně)
 
     Nastavení, které se skoro nemění - ClientId, vzorový web, knihovna, hodnota
@@ -27,7 +28,7 @@
     přenese jen jejich struktura - to je běžnější případ.
 
 .PARAMETER Steps
-    Co se má dělat. Výchozí: Folders, Lists, Events, DefaultValues.
+    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, DefaultValues.
     Navigation je potřeba vyžádat výslovně.
 
 .PARAMETER SourceSiteUrl
@@ -49,6 +50,10 @@
     ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -WithData -Apply
 
 .EXAMPLE
+    # Jen stránky a vzhled, nic jiného
+    ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -Steps Pages -Apply
+
+.EXAMPLE
     # Jen složky
     ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -Steps Folders -Apply
 
@@ -64,8 +69,8 @@ param(
     [switch] $Apply,
     [switch] $WithData,
 
-    [ValidateSet("Folders", "Lists", "Events", "Navigation", "DefaultValues")]
-    [string[]] $Steps = @("Folders", "Lists", "Events", "DefaultValues"),
+    [ValidateSet("Folders", "Lists", "Events", "Pages", "Navigation", "DefaultValues")]
+    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "DefaultValues"),
 
     [string] $SourceSiteUrl = "",
     [string] $ConfigPath = "",
@@ -175,7 +180,7 @@ $library = if ($settings.library) { $settings.library } else { "Dokumenty" }
 $structureFile = Resolve-RepoPath $(if ($settings.folderStructureFile) { $settings.folderStructureFile } else { "Folder_Structure.xlsx" })
 $fixedMetadata = ConvertTo-Hashtable $settings.fixedMetadata
 
-$needsSource = @("Lists", "Events", "Navigation") | Where-Object { $Steps -contains $_ }
+$needsSource = @("Lists", "Events", "Pages", "Navigation") | Where-Object { $Steps -contains $_ }
 if ($needsSource -and -not $SourceSiteUrl) {
     throw "Kroky $($needsSource -join ', ') potřebují vzorový web. Doplňte sourceSiteUrl do konfigurace, nebo předejte -SourceSiteUrl."
 }
@@ -205,7 +210,13 @@ if (-not $Apply) {
     Write-Host " Režim náhledu. Pro provedení přidejte -Apply" -ForegroundColor Yellow
 }
 
-Assert-ScriptsPresent @("New-FolderStructure.ps1", "Copy-SharePointLists.ps1", "Copy-SharePointEvents.ps1")
+Assert-ScriptsPresent @(
+    "New-FolderStructure.ps1",
+    "Copy-SharePointLists.ps1",
+    "Copy-SharePointEvents.ps1",
+    "Copy-SitePages.ps1",
+    "Copy-SiteNavigation.ps1"
+)
 
 # ============================================================
 # Složky z Excelu
@@ -302,6 +313,22 @@ Invoke-Step "Events" {
         -TargetSiteUrl $TargetSiteUrl `
         -CopyValues $copyValues `
         -ClientId $clientId
+}
+
+# ============================================================
+# Stránky, obrázky, vzhled a regionální nastavení
+# ============================================================
+
+Invoke-Step "Pages" {
+    $arguments = @{
+        SourceSiteUrl = $SourceSiteUrl
+        TargetSiteUrl = $TargetSiteUrl
+        ClientId      = $clientId
+        OutputFolder  = (Resolve-RepoPath $OutputFolder)
+    }
+    if ($Apply) { $arguments["Apply"] = $true }
+
+    & (Join-Path $scriptRoot "Copy-SitePages.ps1") @arguments
 }
 
 # ============================================================

@@ -54,7 +54,8 @@ Tohle je ten běžný případ. Udělá:
    hodnoty CSD Class,
 2. **výchozí hodnoty sloupců**, aby CSD Class dostal každý nově nahraný soubor,
 3. **seznamy** ze vzorového webu — jen strukturu, bez položek,
-4. **kalendáře** (Events) ze vzorového webu — také bez položek.
+4. **kalendáře** (Events) ze vzorového webu — také bez položek,
+5. **stránky, obrázky, vzhled a regionální nastavení** ze vzorového webu.
 
 ### Včetně obsahu seznamů a kalendářů
 
@@ -71,9 +72,13 @@ Tohle je ten běžný případ. Udělá:
 ... -TargetSiteUrl "..." -Steps Lists,Events -Apply
 ```
 
-Možnosti: `Folders`, `Lists`, `Events`, `DefaultValues`, `Navigation`.
-Výchozí je `Folders, Lists, Events, DefaultValues` — `Navigation` je potřeba
-vyžádat výslovně.
+Možnosti: `Folders`, `Lists`, `Events`, `Pages`, `DefaultValues`, `Navigation`.
+Výchozí je `Folders, Lists, Events, Pages, DefaultValues` — `Navigation` je
+potřeba vyžádat výslovně.
+
+Pořadí kroků je dané a nezávisí na tom, jak se vypíšou ve `-Steps`: nejdřív
+složky, pak seznamy a kalendáře, teprve pak stránky. Webparty na stránkách totiž
+odkazují na seznamy, které musí existovat dřív.
 
 ## Metadata na složkách versus na souborech
 
@@ -118,6 +123,7 @@ managementu** — viz [decisions.md](decisions.md) a
 | DefaultValues | přímo v Setup | ano, vypíše, co by nastavil |
 | Lists | [Copy-SharePointLists.ps1](../src/Copy-SharePointLists.ps1) | **ne**, jen řekne, že by se spustil |
 | Events | [Copy-SharePointEvents.ps1](../src/Copy-SharePointEvents.ps1) | **ne**, jen řekne, že by se spustil |
+| Pages | [Copy-SitePages.ps1](../src/Copy-SitePages.ps1) | ano, vypíše stránky |
 | Navigation | [Copy-SiteNavigation.ps1](../src/Copy-SiteNavigation.ps1) | ano, vypíše strom |
 
 `Copy-SharePointLists.ps1` a `Copy-SharePointEvents.ps1` (autor Sergiu Nica)
@@ -154,7 +160,12 @@ procesu PowerShellu, takže se přihlašovací okno normálně objeví jen u prv
 z Excelu. Kopírování knihoven včetně souborů řeší `Copy-PnPDocLibs` ve
 `script.ps1` (autor Sergiu Nica) — zatím na vlastní branchi.
 
-**Nepřenáší stránky, webparty ani oprávnění.**
+**Nepřenáší oprávnění.** Skupiny ani role se neřeší vůbec.
+
+Stránky, webparty a vzhled přenáší krok `Pages` — podrobněji
+v [10-stranky-a-vzhled.md](10-stranky-a-vzhled.md). Pozor, **stránky se
+přepisují celé**, takže opakované spuštění zahodí ruční úpravy na cílových
+stránkách. Jediný krok, který nepracuje přírůstkově.
 
 **Navigace není seznam.** Levá navigace se neukládá jako list, ale jako
 navigační struktura webu, takže ji skripty na kopírování seznamů nepřenesou.
