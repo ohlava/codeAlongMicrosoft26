@@ -10,8 +10,11 @@
       Copy-SharePointLists.ps1    seznamy ze vzorového webu
       Copy-SharePointEvents.ps1   kalendáře (Events) ze vzorového webu
       Copy-SitePages.ps1          stránky, obrázky, vzhled, regionální nastavení
+      Set-CsdClass.ps1            CSD Class na knihovně a jejích souborech
       Copy-SiteNavigation.ps1     navigace (volitelně)
       script.ps1                  původní klonovací skript (volitelně)
+
+    Všechny leží v src/ vedle tohoto skriptu.
 
     Nastavení, které se skoro nemění - ClientId, vzorový web, knihovna, hodnota
     CSD Class - se drží v config/settings.json, takže se nepíše do příkazu.
@@ -29,7 +32,7 @@
     přenese jen jejich struktura - to je běžnější případ.
 
 .PARAMETER Steps
-    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, DefaultValues.
+    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, CsdClass.
     Navigation a TemplateClone je potřeba vyžádat výslovně.
 
     TemplateClone spustí původní script.ps1, který naklonuje vzorový web jako
@@ -56,7 +59,7 @@
 
 .EXAMPLE
     # Naklonovat vzorový web jako celek a pak doplnit složky z Excelu
-    ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -Steps TemplateClone,Folders,DefaultValues -Apply
+    ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -Steps TemplateClone,Folders,CsdClass -Apply
 
 .EXAMPLE
     # Jen stránky a vzhled, nic jiného
@@ -78,8 +81,8 @@ param(
     [switch] $Apply,
     [switch] $WithData,
 
-    [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Pages", "Navigation", "DefaultValues")]
-    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "DefaultValues"),
+    [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Pages", "Navigation", "CsdClass")]
+    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "CsdClass"),
 
     [string] $SourceSiteUrl = "",
     [string] $ConfigPath = "",
@@ -221,6 +224,7 @@ if (-not $Apply) {
 
 Assert-ScriptsPresent @(
     "New-FolderStructure.ps1",
+    "Set-CsdClass.ps1",
     "Copy-SharePointLists.ps1",
     "Copy-SharePointEvents.ps1",
     "Copy-SitePages.ps1",
@@ -235,53 +239,10 @@ Assert-ScriptsPresent @(
 # jeho kopie s doplněnými hodnotami a spustí se ta. Originál zůstane nedotčený.
 # ============================================================
 
-# Vrátí hodnotu ve tvaru, který PowerShell zapíše do souboru jako $true/$false.
-function Get-FlagLiteral($Value, $Default) {
-    $effective = if ($null -eq $Value) { $Default } else { [bool]$Value }
-    if ($effective) { return '$true' } else { return '$false' }
-}
-
-# Jeden řádek konfigurace v hlavičce script.ps1. Vrací nahrazený řádek, nebo
-# původní, pokud se ho nic netýká. Záměrně bez switch/continue - jejich chování
-# uvnitř smyčky se v PowerShellu snadno vyloží špatně.
-function Convert-LegacyConfigLine($Line, $Config) {
-    if ($Line -match '^\s*\$SiteDomain\s*=')            { return "`$SiteDomain = `"$($Config.Domain)`"" }
-    if ($Line -match '^\s*\$SourcePath\s*=')            { return "`$SourcePath = `"$($Config.SourceRelative)`"" }
-    if ($Line -match '^\s*\$TargetPath\s*=')            { return "`$TargetPath = `"$($Config.TargetRelative)`"" }
-    if ($Line -match '^\s*\$SetOfflineAvailable\s*=')   { return "`$SetOfflineAvailable = `"$($Config.Offline)`"" }
-    if ($Line -match '^\s*\$CopyCount\s*=')             { return "`$CopyCount = $($Config.CopyCount)" }
-    if ($Line -match '^\s*\$ClientId\s*=')              { return "`t`$ClientId = `"$($Config.ClientId)`"" }
-    if ($Line -match '^\s*\$IsCopyPages\s*=')           { return "`$IsCopyPages = $($Config.Pages);" }
-    if ($Line -match '^\s*\$IsCopyTemplateDesign\s*=')  { return "`$IsCopyTemplateDesign = $($Config.Design);" }
-    if ($Line -match '^\s*\$IsCopyRegionalSettings\s*=') { return "`$IsCopyRegionalSettings = $($Config.Regional);" }
-    if ($Line -match '^\s*\$IsCopyNavigation\s*=')      { return "`$IsCopyNavigation = $($Config.Navigation);" }
-
-    # Clear-Host by smazal výpis předchozích kroků z obrazovky.
-    if ($Line -match '^\s*Clear-Host\s*$') {
-        return "# Clear-Host  # vypnuto, aby nezmizel výpis Setup-ProjectSite"
-    }
-
-    # Řádky 2, 5 a 6 originálu nejsou zakomentované - PowerShell je zkouší
-    # spustit jako příkazy a vypíše chybu. V originálu to zakryje Clear-Host.
-    if ($Line -match '^(Bitte beim |add Banner-copy |Config\s*$)') {
-        return "# $Line"
-    }
-
-    return $Line
-}
-
-function New-PatchedLegacyScript($ScriptPath, $OutPath, $Config) {
-    $patched = foreach ($line in (Get-Content -Path $ScriptPath -Encoding UTF8)) {
-        Convert-LegacyConfigLine $line $Config
-    }
-
-    $patched | Set-Content -Path $OutPath -Encoding UTF8
-}
-
 Invoke-Step "TemplateClone" {
-    $legacyPath = Resolve-RepoPath "script.ps1"
+    $legacyPath = Join-Path $scriptRoot "script.ps1"
     if (-not (Test-Path $legacyPath)) {
-        throw "script.ps1 v korenu repozitare není."
+        throw "src/script.ps1 chybí."
     }
 
     $options = $settings.legacyScript
@@ -292,37 +253,30 @@ Invoke-Step "TemplateClone" {
         throw "script.ps1 umí kopírovat jen v rámci jednoho tenantu, ale vzor je na $sourceDomain a cíl na $domain."
     }
 
-    $config = [pscustomobject]@{
-        Domain         = $domain
-        SourceRelative = ([uri]$SourceSiteUrl).AbsolutePath.TrimEnd("/")
-        TargetRelative = ([uri]$TargetSiteUrl).AbsolutePath.TrimEnd("/")
-        ClientId       = $clientId
-        # CopyCount = 1 znamená, že se nezpracuje žádný seznam - podmínka
-        # v script.ps1 je "$counter -lt $CopyCount" a counter začíná na 1.
-        # Stránky, navigace a vzhled se přenesou i tak.
-        CopyCount      = if ($options.copyLists -eq $false) { 1 } else { 1000 }
-        Offline        = if ($options.setOfflineAvailable -eq $true) { "ja" } else { "nein" }
-        Pages          = Get-FlagLiteral $options.copyPages $true
-        Design         = Get-FlagLiteral $options.copyDesign $true
-        Regional       = Get-FlagLiteral $options.copyRegional $true
-        Navigation     = Get-FlagLiteral $options.copyNavigation $true
+    # CopyCount = 1 znamená, že se nezpracuje žádný seznam - podmínka ve
+    # script.ps1 je "$counter -lt $CopyCount" a counter začíná na 1. Stránky,
+    # navigace a vzhled se přenesou i tak, volají se až za tou smyčkou.
+    $arguments = @{
+        SiteDomain             = $domain
+        SourcePath             = ([uri]$SourceSiteUrl).AbsolutePath.TrimEnd("/")
+        TargetPath             = ([uri]$TargetSiteUrl).AbsolutePath.TrimEnd("/")
+        ClientId               = $clientId
+        CopyCount              = $(if ($options.copyLists -eq $false) { 1 } else { 1000 })
+        SetOfflineAvailable    = $(if ($options.setOfflineAvailable -eq $true) { "ja" } else { "nein" })
+        IsCopyPages            = ($options.copyPages -ne $false)
+        IsCopyTemplateDesign   = ($options.copyDesign -ne $false)
+        IsCopyRegionalSettings = ($options.copyRegional -ne $false)
+        IsCopyNavigation       = ($options.copyNavigation -ne $false)
     }
 
-    # Generovaná kopie obsahuje ClientId a adresy tenantu, proto jde do export/,
-    # který je v .gitignore.
-    $generated = Join-Path (Resolve-RepoPath $OutputFolder) "script.generated.ps1"
-
-    New-PatchedLegacyScript $legacyPath $generated $config
-
-    Write-Host "  vygenerováno: $generated"
-    Write-Host "  doplněné hodnoty:"
-    Get-Content -Path $generated -Encoding UTF8 |
-        Select-String -Pattern '^\$(SiteDomain|SourcePath|TargetPath|CopyCount|SetOfflineAvailable|IsCopy)' |
-        ForEach-Object { Write-Host "    $($_.Line)" -ForegroundColor DarkGray }
+    Write-Host "  vzor:     $($arguments.SourcePath)"
+    Write-Host "  cíl:      $($arguments.TargetPath)"
+    Write-Host "  seznamy:  $(if ($arguments.CopyCount -eq 1) { 'ne' } else { 'ano' })"
+    Write-Host "  stránky:  $($arguments.IsCopyPages)   vzhled: $($arguments.IsCopyTemplateDesign)   navigace: $($arguments.IsCopyNavigation)"
 
     if (-not $Apply) {
         Write-Host ""
-        Write-Host "  [náhled] spustil bych tuto kopii. Režim náhledu tento skript nemá." -ForegroundColor Yellow
+        Write-Host "  [náhled] spustil bych script.ps1 s těmito parametry. Režim náhledu nemá." -ForegroundColor Yellow
         Write-Host "  POZOR: script.ps1 v cíli MAŽE seznamy, než je vytvoří znovu." -ForegroundColor Red
         Write-Host "  Používejte ho jen na čerstvě založený web." -ForegroundColor Red
         return
@@ -330,7 +284,7 @@ Invoke-Step "TemplateClone" {
 
     Write-Host ""
     Write-Host "  Spouštím klonování. Maže a znovu vytváří seznamy v cíli." -ForegroundColor Yellow
-    & $generated
+    & $legacyPath @arguments
 }
 
 # ============================================================
@@ -352,44 +306,34 @@ Invoke-Step "Folders" {
 }
 
 # ============================================================
-# Výchozí hodnoty sloupců
+# CSD Class na knihovně
 #
 # Metadata na složce platí pro složku, ne pro soubory v ní. Aby hodnotu dostal
 # každý nově nahraný soubor, musí být nastavená jako výchozí hodnota sloupce
 # v knihovně - to je jiný mechanismus než zápis na položku.
 # ============================================================
 
-Invoke-Step "DefaultValues" {
-    if ($settings.setDefaultColumnValues -eq $false) {
-        Write-Host "  vypnuto v konfiguraci (setDefaultColumnValues = false)"
-        $results["DefaultValues"] = "vypnuto"
-        return
-    }
-
+Invoke-Step "CsdClass" {
     if ($fixedMetadata.Count -eq 0) {
-        Write-Host "  žádná konstantní metadata, není co nastavovat"
-        $results["DefaultValues"] = "nic k nastavení"
+        Write-Host "  žádná konstantní metadata v konfiguraci, nic k nastavení"
+        $results["CsdClass"] = "nic k nastavení"
         return
     }
 
-    if (-not $Apply) {
-        foreach ($key in ($fixedMetadata.Keys | Sort-Object)) {
-            Write-Host "  [náhled] nastavil bych výchozí hodnotu $key = $($fixedMetadata[$key])" -ForegroundColor Yellow
-        }
-        return
-    }
+    $scope = if ($settings.csdClassScope) { $settings.csdClassScope } else { "DefaultValue" }
 
-    Connect-PnPOnline -Url $TargetSiteUrl -Interactive -ClientId $clientId
+    foreach ($field in ($fixedMetadata.Keys | Sort-Object)) {
+        $arguments = @{
+            SiteUrl  = $TargetSiteUrl
+            Library  = $library
+            Field    = $field
+            Value    = $fixedMetadata[$field]
+            Scope    = $scope
+            ClientId = $clientId
+        }
+        if ($Apply) { $arguments["Apply"] = $true }
 
-    foreach ($key in ($fixedMetadata.Keys | Sort-Object)) {
-        try {
-            Set-PnPDefaultColumnValue -List $library -Field $key -Value $fixedMetadata[$key] -ErrorAction Stop
-            Write-Host "  + výchozí hodnota $key = $($fixedMetadata[$key])" -ForegroundColor Green
-        }
-        catch {
-            Write-Host "  ! výchozí hodnotu $key nelze nastavit: $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-Host "    Metadata na složkách se zapsala, tohle ovlivňuje jen nově nahrávané soubory." -ForegroundColor DarkGray
-        }
+        & (Join-Path $scriptRoot "Set-CsdClass.ps1") @arguments
     }
 }
 

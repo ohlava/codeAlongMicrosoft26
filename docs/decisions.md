@@ -151,4 +151,58 @@ přidávané. Doplnění metadat u existujících souborů zatím není řešen�
 
 ---
 
+## 2026-09-09 | TECH | Do RevIMBCS se zapisuje přes CSOM, odemykání není potřeba
+
+Rozhodl: Ondřej Hlava, na základě `Set-CsdClass.ps1` od Sergiu Nicy
+(branch `Set-CSD-Class`).
+
+Sloupec `Třída KSU` / `CSD Class` (`RevIMBCS`) je `TaxonomyFieldType` označený
+`ReadOnly`. `Set-PnPListItem` do něj hodnotu zahodí, ale CSOM projde:
+
+    $value = New-Object Microsoft.SharePoint.Client.Taxonomy.TaxonomyFieldValue
+    $value.Label = <nazev terminu>; $value.TermGuid = <guid>; $value.WssId = -1
+    $field.SetFieldValueByValue($item, $value)
+    $item.Update()
+    # po vsech zapisech: Invoke-PnPQuery
+
+Přebráno do `New-FolderStructure.ps1` (metadata na složkách) a
+`Set-CsdClass.ps1` (výchozí hodnota sloupce a existující soubory).
+
+Termíny se čtou přímo z `TermSetId` sloupce přes `TaxonomySession`, takže se
+nemusí procházet skupiny Term Store — nahradilo to původní hledání skupinou po
+skupině.
+
+Důsledky:
+
+- `-UnlockReadOnlyFields` je potřeba už jen pro obyčejné ReadOnly sloupce, ne
+  pro spravovaná metadata.
+- Přepnutí cíle z textového `CSD_x0020_Class` na `RevIMBCS` je jen změna
+  v `config/settings.json`.
+- **Zůstává nepotvrzené**, jestli se do `RevIMBCS` smí zapisovat. Že to
+  technicky jde, není souhlas správce records managementu.
+
+---
+
+## 2026-09-09 | TECH | script.ps1 přesunut do src/ a převeden na parametry
+
+Rozhodl: Ondřej Hlava, se souhlasem vlastníka use casu.
+
+`script.ps1` byl v korenu repozitáře a konfiguroval se editací hlavičky. Je
+teď v `src/script.ps1` jako verze 2.8 s parametry (`-SiteDomain`, `-SourcePath`,
+`-TargetPath`, `-ClientId`, `-CopyCount`, příznaky `-IsCopy*`), takže ho
+`Setup-ProjectSite.ps1` volá jako krok `TemplateClone` bez generování upravené
+kopie.
+
+Původní hodnoty zůstaly jako výchozí, takže spuštění bez parametrů se chová
+jako dřív. Navíc je vypnutý `Clear-Host`, který mazal výpis volajícího skriptu,
+a zakomentované řádky 2, 5 a 6, které nebyly komentáře a PowerShell je zkoušel
+spustit jako příkazy.
+
+Riziko: branche `add-library-copy-function-with-folder-structure` a
+`copy-listContent` mění `script.ps1` v korenu, takže při merge vznikne konflikt
+kvůli přesunu. Řešit spolu se Sergiuem, verze 2.7 s `Copy-PnPDocLibs` má být
+zachovaná.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

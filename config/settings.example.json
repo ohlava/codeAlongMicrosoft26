@@ -8,13 +8,15 @@
   "library": "Dokumenty",
   "folderStructureFile": "Folder_Structure.xlsx",
 
+  "_fixedMetadataComment": "Metadata na kazde vytvorene slozce. Klic je interni nazev sloupce. RevIMBCS je sloupec CSD Class se spravovanymi metadaty - hodnota se dohleda jako termin v Term Store.",
   "fixedMetadata": {
-    "CSD_x0020_Class": "5.3 Car Series and Concept Docs"
+    "RevIMBCS": "5.3 Car Series and Concept Docs"
   },
 
-  "setDefaultColumnValues": true,
+  "_csdClassScopeComment": "DefaultValue = jen vychozi hodnota pro nove nahravane soubory. Both = navic oznaci i soubory, ktere v knihovne uz jsou. ExistingFiles = jen ty existujici.",
+  "csdClassScope": "DefaultValue",
 
-  "_legacyScriptComment": "Nastaveni pro krok TemplateClone, ktery spousti puvodni script.ps1. Pouziva se jen kdyz je TemplateClone ve -Steps.",
+  "_legacyScriptComment": "Nastaveni pro krok TemplateClone, ktery spousti src/script.ps1. Pouziva se jen kdyz je TemplateClone ve -Steps.",
   "legacyScript": {
     "copyLists": false,
     "copyPages": true,

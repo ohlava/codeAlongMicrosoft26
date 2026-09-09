@@ -46,9 +46,12 @@
     export/terms-<sloupec>.csv. Slouží k dohledání přesného názvu termínu.
 
 .PARAMETER UnlockReadOnlyFields
-    Sloupec označený ReadOnlyField zápis tiše zahodí. S tímto přepínačem ho
-    skript před zápisem odemkne a po dokončení vrátí zpět na ReadOnly - i když
-    zápis mezitím selže. Vyžaduje právo měnit sloupce knihovny.
+    Obyčejný sloupec označený ReadOnlyField zápis tiše zahodí. S tímto
+    přepínačem ho skript před zápisem odemkne a po dokončení vrátí zpět na
+    ReadOnly - i když zápis mezitím selže. Vyžaduje právo měnit sloupce knihovny.
+
+    Pro sloupce se spravovanými metadaty tohle potřeba NENÍ - do těch se
+    zapisuje přes CSOM, kterému příznak ReadOnly nevadí.
 
 .PARAMETER ListFields
     Nic nevytváří. Vypíše sloupce knihovny s jejich interními názvy a typy
@@ -331,7 +334,9 @@ function Get-ExistingFolderMap($List, $LibraryRoot) {
             $relative = $relative.Substring($LibraryRoot.Length)
         }
         $relative = $relative.TrimStart("/")
-        if ($relative) { $map[$relative] = $item.Id }
+        # Držíme celý objekt položky, ne jen Id - zápis do sloupce se
+        # spravovanými metadaty jde přes CSOM a potřebuje ListItem.
+        if ($relative) { $map[$relative] = $item }
     }
     return $map
 }
@@ -419,8 +424,12 @@ function Get-SafeInternalName($Name) {
     return $clean
 }
 
+# Rozdělí metadata na dvě skupiny, protože se zapisují jinak:
+#   Plain    - obyčejné sloupce, jde na ně Set-PnPListItem
+#   Taxonomy - spravovaná metadata, jdou přes CSOM (i na ReadOnly poli)
 function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath, $List) {
-    $converted = @{}
+    $plain = @{}
+    $taxonomy = @()
 
     foreach ($key in $Metadata.Keys) {
         $field = Resolve-Field $key $FieldIndex
@@ -430,45 +439,36 @@ function Convert-MetadataKeys($Metadata, $FieldIndex, $FolderPath, $List) {
             continue
         }
 
-        # Do sloupce označeného ReadOnlyField SharePoint zápis tiše zahodí -
-        # Set-PnPListItem projde bez chyby, ale hodnota se neuloží.
+        if ($field.Sealed) {
+            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je Sealed - mění se jen na úrovni content typu, ne tady."
+        }
+
+        if (Test-IsTaxonomyField $field) {
+            $term = Resolve-Term $List $field.InternalName $Metadata[$key]
+
+            if (-not $term) {
+                Add-StructureWarning "Metadata '$key' u '$FolderPath' přeskakuji - termín '$($Metadata[$key])' se nepodařilo přeložit."
+                continue
+            }
+
+            $taxonomy += [pscustomobject]@{
+                InternalName = $field.InternalName
+                Term         = $term
+            }
+            continue
+        }
+
+        # Do obyčejného sloupce označeného ReadOnlyField SharePoint zápis přes
+        # Set-PnPListItem tiše zahodí - projde bez chyby, hodnota se neuloží.
         if ($field.ReadOnly -and -not $UnlockReadOnlyFields) {
             Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je ReadOnly, zápis by se zahodil. Použijte -UnlockReadOnlyFields, nebo ho odemkněte ručně."
             continue
         }
 
-        if ($field.Sealed) {
-            Add-StructureWarning "Sloupec '$key' ($($field.InternalName)) je Sealed - mění se jen na úrovni content typu, ne tady."
-        }
-
-        # Sloupec se spravovanými metadaty přijímá GUID termínu. Text se proto
-        # nejdřív dohledá v term setu, ke kterému je sloupec připojený - jinak
-        # by SharePoint hodnotu jen tiše zahodil.
-        if (Test-IsTaxonomyField $field) {
-            $value = "$($Metadata[$key])"
-
-            if ($value -match '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
-                $converted[$field.InternalName] = $value
-                continue
-            }
-
-            $settings = Get-TaxonomyFieldSettings $List $field.InternalName
-            if (-not $settings) { continue }
-
-            $termId = Resolve-TermId $settings.TermSetId $value
-            if (-not $termId) {
-                Add-StructureWarning "Metadata '$key' u '$FolderPath' přeskakuji - termín '$value' se nepodařilo přeložit."
-                continue
-            }
-
-            $converted[$field.InternalName] = if ($settings.IsMulti) { @($termId) } else { $termId }
-            continue
-        }
-
-        $converted[$field.InternalName] = $Metadata[$key]
+        $plain[$field.InternalName] = $Metadata[$key]
     }
 
-    return $converted
+    return [pscustomobject]@{ Plain = $plain; Taxonomy = @($taxonomy) }
 }
 
 function Set-MetadataColumns($List, $TargetColumns) {
@@ -558,151 +558,140 @@ function Enable-FieldReadOnly($List, $FieldNames) {
     }
 }
 
-$script:TermIndexCache = @{}
+$script:TermCache = @{}
 
-# Ke kterému term setu je sloupec připojený. Čte se ze SchemaXml, protože
-# vlastnosti SspId a TermSetId nejsou na objektu Field přímo dostupné.
-function Get-TaxonomyFieldSettings($List, $InternalName) {
-    $field = Get-PnPField -List $List.Id -Identity $InternalName
-
+# Sloupec se spravovanými metadaty jako CSOM objekt. Načítá se přes kolekci
+# Fields, protože CSOM vrátí rovnou typ TaxonomyField - ten má TermSetId
+# i metodu SetFieldValueByValue, které obyčejný Field nemá.
+function Get-TaxonomyField($List, $InternalName) {
     try {
-        $xml = [xml]$field.SchemaXml
+        $fields = Get-PnPProperty -ClientObject $List -Property Fields -ErrorAction Stop
     }
     catch {
-        Add-StructureWarning "SchemaXml sloupce '$InternalName' nelze přečíst: $($_.Exception.Message)"
+        Add-StructureWarning "Sloupce knihovny nelze načíst: $($_.Exception.Message)"
         return $null
     }
 
-    $properties = @{}
-    foreach ($node in $xml.SelectNodes("//Property")) {
-        $name = $node.SelectSingleNode("Name")
-        $value = $node.SelectSingleNode("Value")
-        if ($name -and $value) { $properties[$name.InnerText] = $value.InnerText }
-    }
-
-    if (-not $properties.ContainsKey("TermSetId")) {
-        Add-StructureWarning "U sloupce '$InternalName' se nepodařilo zjistit TermSetId."
+    $field = $fields | Where-Object { $_.InternalName -eq $InternalName } | Select-Object -First 1
+    if (-not $field) {
+        Add-StructureWarning "Sloupec '$InternalName' v knihovně není."
         return $null
     }
 
-    return [pscustomobject]@{
-        InternalName = $InternalName
-        SspId        = $properties["SspId"]
-        TermSetId    = $properties["TermSetId"]
-        AnchorId     = $properties["AnchorId"]
-        IsMulti      = $field.TypeAsString -eq "TaxonomyFieldTypeMulti"
-    }
+    return $field
 }
 
-# Term set se dohledává průchodem skupin, protože z TermSetId samotného se
-# skupina zjistit nedá a Get-PnPTerm ji potřebuje.
-function Find-TermSet($TermSetId) {
-    foreach ($group in (Get-PnPTermGroup)) {
-        try {
-            $sets = Get-PnPTermSet -TermGroup $group.Name -ErrorAction Stop
-        }
-        catch { continue }
-
-        foreach ($set in $sets) {
-            if ($set.Id.ToString() -eq $TermSetId) {
-                return [pscustomobject]@{ Group = $group.Name; Set = $set.Name; Id = $set.Id }
-            }
-        }
-    }
-    return $null
-}
-
-# Termíny term setu jako seznam s celou cestou. Používá se k dohledání GUIDu
-# podle názvu i k výpisu přes -ListTerms.
-function Get-TermList($TermSetId) {
-    if ($script:TermIndexCache.ContainsKey($TermSetId)) {
-        return $script:TermIndexCache[$TermSetId]
+# Termíny term setu, ke kterému je sloupec připojený. Jde se přímo z pole na
+# jeho TermSetId, takže není potřeba hledat skupinu v Term Store.
+# Postup převzatý ze Set-CsdClass.ps1 (autor Sergiu Nica).
+function Get-TermsForField($List, $InternalName) {
+    if ($script:TermCache.ContainsKey($InternalName)) {
+        return $script:TermCache[$InternalName]
     }
 
-    $located = Find-TermSet $TermSetId
-    if (-not $located) {
-        Add-StructureWarning "Term set $TermSetId se v Term Store nepodařilo najít. Máte na Term Store přístup?"
-        $script:TermIndexCache[$TermSetId] = @()
-        return @()
+    $result = [pscustomobject]@{ Field = $null; Terms = @() }
+
+    $field = Get-TaxonomyField $List $InternalName
+    if (-not $field) {
+        $script:TermCache[$InternalName] = $result
+        return $result
+    }
+    $result.Field = $field
+
+    if (-not $field.TermSetId) {
+        Add-StructureWarning "U sloupce '$InternalName' se nepodařilo zjistit TermSetId. Je to opravdu sloupec se spravovanými metadaty?"
+        $script:TermCache[$InternalName] = $result
+        return $result
     }
 
     try {
-        $terms = Get-PnPTerm -TermGroup $located.Group -TermSet $located.Set -Recursive -ErrorAction Stop
+        $context = Get-PnPContext
+        $session = [Microsoft.SharePoint.Client.Taxonomy.TaxonomySession]::GetTaxonomySession($context)
+        $termStore = $session.GetDefaultSiteCollectionTermStore()
+        $termSet = $termStore.GetTermSet([Guid]$field.TermSetId)
+        $terms = $termSet.GetAllTerms()
+
+        $context.Load($terms)
+        $context.ExecuteQuery()
+
+        $result.Terms = @($terms)
     }
     catch {
-        # Starší verze PnP nemají -Recursive; pak se dostaneme aspoň k první úrovni.
-        try {
-            $terms = Get-PnPTerm -TermGroup $located.Group -TermSet $located.Set -ErrorAction Stop
-            Add-StructureWarning "Termíny se načetly bez -Recursive, vnořené termíny nemusí být vidět."
-        }
-        catch {
-            Add-StructureWarning "Termíny term setu '$($located.Set)' nelze načíst: $($_.Exception.Message)"
-            $script:TermIndexCache[$TermSetId] = @()
-            return @()
-        }
+        Add-StructureWarning "Termíny pro '$InternalName' nelze načíst: $($_.Exception.Message). Máte přístup na Term Store?"
     }
 
-    $list = foreach ($term in $terms) {
-        [pscustomobject]@{
-            Name      = $term.Name
-            Id        = $term.Id.ToString()
-            TermGroup = $located.Group
-            TermSet   = $located.Set
-        }
-    }
-
-    $script:TermIndexCache[$TermSetId] = @($list)
-    return @($list)
+    $script:TermCache[$InternalName] = $result
+    return $result
 }
 
-# Termín podle názvu. Vrací GUID, nebo $null a vysvětlení, proč to nešlo.
-function Resolve-TermId($TermSetId, $Label) {
-    $terms = Get-TermList $TermSetId
-    if ($terms.Count -eq 0) { return $null }
+# Termín podle názvu. Vrací objekt termínu, nebo $null a vysvětlení.
+function Resolve-Term($List, $InternalName, $Label) {
+    $source = Get-TermsForField $List $InternalName
+    if ($source.Terms.Count -eq 0) { return $null }
 
-    $wanted = $Label.Trim()
-    $exact = @($terms | Where-Object { $_.Name.Trim() -eq $wanted })
+    $wanted = "$Label".Trim()
 
-    if ($exact.Count -eq 1) { return $exact[0].Id }
-
+    $exact = @($source.Terms | Where-Object { $_.Name.Trim() -eq $wanted })
+    if ($exact.Count -eq 1) { return $exact[0] }
     if ($exact.Count -gt 1) {
-        $ids = ($exact | ForEach-Object { $_.Id }) -join ", "
-        Add-StructureWarning "Termín '$Label' je v term setu víckrát ($ids). Předejte GUID toho správného."
+        Add-StructureWarning "Termín '$Label' je v term setu víckrát. Předejte GUID toho správného."
         return $null
     }
 
-    $similar = @($terms | Where-Object { $_.Name -like "*$wanted*" -or $wanted -like "*$($_.Name)*" } |
-        Select-Object -First 5 | ForEach-Object { "'$($_.Name)'" })
-    $hint = if ($similar.Count -gt 0) { " Podobné termíny: $($similar -join ', ')." } else { "" }
+    # Termíny bývají číslované ("5.3 Car Series..."), takže se dá zadat i jen
+    # to číslo. Stejná úvaha jako v Set-CsdClass.ps1.
+    $byNumber = @($source.Terms | Where-Object {
+        if ($_.Name -match '^(\d+(?:\.\d+)*)\b') { $Matches[1] -eq $wanted } else { $false }
+    })
+    if ($byNumber.Count -eq 1) { return $byNumber[0] }
 
-    Add-StructureWarning "Termín '$Label' v term setu není.$hint Seznam termínů vypíše -ListTerms <internalName>."
+    $similar = @($source.Terms | Where-Object { $_.Name -like "*$wanted*" } |
+        Select-Object -First 5 | ForEach-Object { "'$($_.Name)'" })
+    $hint = if ($similar.Count -gt 0) { " Podobné: $($similar -join ', ')." } else { "" }
+
+    Add-StructureWarning "Termín '$Label' v term setu není.$hint Seznam vypíše -ListTerms $InternalName."
     return $null
+}
+
+# Zápis do sloupce se spravovanými metadaty přes CSOM. Set-PnPListItem tady
+# nepomůže - u pole označeného ReadOnly hodnotu zahodí. SetFieldValueByValue
+# jde pod tím a projde. Postup převzatý ze Set-CsdClass.ps1.
+# Volající musí po všech zápisech zavolat Invoke-PnPQuery.
+function Set-TaxonomyFieldValue($Field, $Item, $Term) {
+    $value = New-Object Microsoft.SharePoint.Client.Taxonomy.TaxonomyFieldValue
+    $value.Label = $Term.Name
+    $value.TermGuid = $Term.Id.ToString()
+    # -1 znamená, že si SharePoint dohledá WssId sám.
+    $value.WssId = -1
+
+    $Field.SetFieldValueByValue($Item, $value)
+    $Item.Update()
 }
 
 function Show-TermSet($List, $FieldInternalName, $OutFolder) {
-    $settings = Get-TaxonomyFieldSettings $List $FieldInternalName
-    if (-not $settings) { return }
+    $source = Get-TermsForField $List $FieldInternalName
 
-    $located = Find-TermSet $settings.TermSetId
-    Write-Host "  sloupec:   $FieldInternalName"
-    Write-Host "  TermSetId: $($settings.TermSetId)"
-    if ($located) {
-        Write-Host "  skupina:   $($located.Group)"
-        Write-Host "  term set:  $($located.Set)"
+    if ($source.Field) {
+        Write-Host "  sloupec:   $($source.Field.InternalName)  ($($source.Field.Title))"
+        Write-Host "  typ:       $($source.Field.TypeAsString)"
+        Write-Host "  TermSetId: $($source.Field.TermSetId)"
     }
     Write-Host ""
 
-    $terms = Get-TermList $settings.TermSetId
-    if ($terms.Count -eq 0) {
+    if ($source.Terms.Count -eq 0) {
         Write-Host "  Žádné termíny se nenačetly." -ForegroundColor Yellow
         return
     }
 
-    $terms | Sort-Object Name | Format-Table Name, Id -AutoSize | Out-String -Width 220 | Write-Host
+    $rows = $source.Terms | ForEach-Object {
+        [pscustomobject]@{ Name = $_.Name; Id = $_.Id.ToString() }
+    }
+
+    $rows | Sort-Object Name | Format-Table Name, Id -AutoSize | Out-String -Width 220 | Write-Host
 
     $target = "$OutFolder/terms-$FieldInternalName.csv"
-    $terms | Sort-Object Name | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
-    Write-Host "  $($terms.Count) termínů, seznam v $target"
+    $rows | Sort-Object Name | Export-Csv -Path $target -NoTypeInformation -Encoding UTF8
+    Write-Host "  $($rows.Count) termínů, seznam v $target"
 }
 
 function Show-LibraryFields($List, $OutFolder) {
@@ -917,26 +906,60 @@ if (-not $SkipMetadata) {
         }
 
         $updated = 0
+        $taxonomyWrites = 0
+
         foreach ($folder in ($desired | Where-Object { $_.Metadata.Count -gt 0 })) {
             if (-not $existing.ContainsKey($folder.Path)) {
                 Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat - složka v knihovně není."
                 continue
             }
 
+            $item = $existing[$folder.Path]
             $values = Convert-MetadataKeys $folder.Metadata $fieldIndex $folder.Path $list
-            if ($values.Count -eq 0) { continue }
+            $touched = $false
 
+            if ($values.Plain.Count -gt 0) {
+                try {
+                    Set-PnPListItem -List $list.Id `
+                        -Identity $item.Id `
+                        -Values $values.Plain `
+                        -ErrorAction Stop | Out-Null
+                    $touched = $true
+                }
+                catch {
+                    Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
+                }
+            }
+
+            # Spravovaná metadata se zapisují přes CSOM a odešlou se dávkou
+            # v Invoke-PnPQuery, až projdou všechny složky.
+            foreach ($assignment in $values.Taxonomy) {
+                $source = Get-TermsForField $list $assignment.InternalName
+                if (-not $source.Field) { continue }
+
+                try {
+                    Set-TaxonomyFieldValue $source.Field $item $assignment.Term
+                    $taxonomyWrites++
+                    $touched = $true
+                }
+                catch {
+                    Add-StructureWarning "Termín do '$($assignment.InternalName)' u '$($folder.Path)' nelze nastavit: $($_.Exception.Message)"
+                }
+            }
+
+            if ($touched) { $updated++ }
+        }
+
+        if ($taxonomyWrites -gt 0) {
+            Write-Host "  odesílám $taxonomyWrites zápisů spravovaných metadat"
             try {
-                Set-PnPListItem -List $list.Id `
-                    -Identity $existing[$folder.Path] `
-                    -Values $values `
-                    -ErrorAction Stop | Out-Null
-                $updated++
+                Invoke-PnPQuery
             }
             catch {
-                Add-StructureWarning "Metadata pro '$($folder.Path)' nelze zapsat: $($_.Exception.Message)"
+                Add-StructureWarning "Zápis spravovaných metadat se nepodařilo odeslat: $($_.Exception.Message)"
             }
         }
+
         Write-Host "  aktualizováno složek: $updated"
     }
     finally {

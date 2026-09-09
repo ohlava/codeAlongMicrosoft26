@@ -7,14 +7,14 @@ Hackathon Code Along with Microsoft 2026, tým 7.
 
 ## Rychlý start
 
-Připravit nový projektový web jedním příkazem:
+**Postup pro nastavení i spuštění je v [docs/12-nastaveni-a-spusteni.md](docs/12-nastaveni-a-spusteni.md).**
+Ostatní dokumenty jsou detaily k jednotlivým částem.
+
+Po nastavení stačí jeden příkaz na projekt:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\Setup-ProjectSite.ps1 -TargetSiteUrl "https://<tenant>.sharepoint.com/sites/<novy-web>" -Apply
 ```
-
-Před prvním použitím je potřeba vytvořit `config/settings.json` — postup
-v [docs/09-jeden-skript.md](docs/09-jeden-skript.md).
 
 ## Kde začít
 
@@ -28,7 +28,8 @@ v [docs/09-jeden-skript.md](docs/09-jeden-skript.md).
 | [docs/05-analyza-skriptu.md](docs/05-analyza-skriptu.md) | Rozbor skriptu, který byznys používá dnes — co umí, co ne, kde má chyby |
 | [docs/06-jak-spustit-export.md](docs/06-jak-spustit-export.md) | Postup spuštění exportu krok za krokem, i pro netechnického uživatele |
 | [docs/08-kopirovani-navigace.md](docs/08-kopirovani-navigace.md) | Přenesení navigace ze vzorového webu na jiný |
-| [docs/09-jeden-skript.md](docs/09-jeden-skript.md) | **Hlavní postup pro byznys** — jeden vstupní bod, konfigurace, flagy |
+| [docs/12-nastaveni-a-spusteni.md](docs/12-nastaveni-a-spusteni.md) | **Začněte tady** — nastavení počítače, konfigurace, spuštění, chyby |
+| [docs/09-jeden-skript.md](docs/09-jeden-skript.md) | Kroky a flagy podrobněji |
 | [docs/10-stranky-a-vzhled.md](docs/10-stranky-a-vzhled.md) | Přenesení stránek, webpartů, obrázků a vzhledu ze vzoru |
 | [docs/11-klonovani-vzoru.md](docs/11-klonovani-vzoru.md) | Krok TemplateClone — spuštění původního script.ps1 |\n| [docs/decisions.md](docs/decisions.md) | Log rozhodnutí — zdroj pravdy |
 | [docs/workstreams.md](docs/workstreams.md) | Kdo na čem pracuje |

@@ -1,30 +1,61 @@
 #Sctipt for copy from template#
-Bitte beim Änderungen am Code diese kurz dokumentieren
+# Konfigurace je od verze 2.8 v parametrech, aby skript mohl volat
+# Setup-ProjectSite.ps1 a nemusel se pred kazdym spustenim editovat.
+# Bez parametru se chova jako dosud - hodnoty nize jsou vychozi.
+param(
+    [string]$SiteDomain = "https://volkswagengroup.sharepoint.com",
+    [string]$SourcePath = "/sites/Project01",
+    [string]$TargetPath = "/sites/Project03",
+    [string]$ClientId = "",
+
+    # "ja" = seznamy budou dostupne offline
+    [string]$SetOfflineAvailable = "nein",
+
+    # true = kopie ze site collection do subwebu
+    [bool]$CopyFromMainToSubSite = $false,
+
+    # true = cilove weby se berou ze Sites.xml
+    [bool]$CopyFromList = $false,
+
+    # Zpracuje CopyCount-1 seznamu. 1 = zadny seznam, jen stranky a vzhled.
+    [int]$CopyCount = 1000,
+
+    [bool]$IsCopyPages = $true,
+    [bool]$IsCopyTemplateDesign = $true,
+    [bool]$IsCopyRegionalSettings = $true,
+    [bool]$IsCopyNavigation = $true
+)
+
+# Bitte beim Änderungen am Code diese kurz dokumentieren
+
+#v2.8
+# presunuto do src/, konfigurace prevedena na parametry,
+# Clear-Host vypnuto, nezakomentovane radky 2/5/6 opraveny
 
 #v2.6
-add Banner-copy function
-Config
+# add Banner-copy function
+# Config
 
-$SiteDomain = "https://volkswagengroup.sharepoint.com"
-$SourcePath = "/sites/Project01"
-$TargetPath = "/sites/Project03"
+# $SiteDomain = "https://volkswagengroup.sharepoint.com"   # -> parametr
+# $SourcePath = "/sites/Project01"   # -> parametr
+# $TargetPath = "/sites/Project03"   # -> parametr
 
-$SetOfflineAvailable = "nein" #ja
+# $SetOfflineAvailable = "nein" #ja   # -> parametr
 
 ##Copy SC > Subweb, Subweb > Subweb, Subweb > SC
 #Set '$true' if you want to copy from SiteCollection to SubWeb. Set '$false' if you want to copy from SubWeb to SiteCollection
 #Default = $false
-$CopyFromMainToSubSite = $false
+# $CopyFromMainToSubSite = $false   # -> parametr
 
 ##Copy from list. If u wanna copy Vorlage in more sites
 #Default = $false
-$CopyFromList = $false
+# $CopyFromList = $false   # -> parametr
 $XmlPathList = "$PSScriptRoot\Sites.xml"
 
 ####################
 
 $LocalFolder = $PSScriptRoot #if there is a 'Path Error' please change it with a absolute path. like: "C:\Users\FBYCUN8\Downloads"
-$CopyCount = 1000 #copy n-1 Items (for testing in a certain number of the list)
+# $CopyCount = 1000 #copy n-1 Items (for testing in a certain number of the list)   # -> parametr
 $IsDevMode = $false
 
 ####################
@@ -33,10 +64,10 @@ $SourceSiteUrl = "$SiteDomain$SourcePath"
 $TargetSiteUrl = "$SiteDomain$TargetPath"
 $FolderPath = "$LocalFolder\FileTemp"
 $ReplaceTarget = $true;
-$IsCopyPages = $true;
-$IsCopyTemplateDesign = $true;
-$IsCopyRegionalSettings = $true;
-$IsCopyNavigation = $true;
+# $IsCopyPages = $true;   # -> parametr
+# $IsCopyTemplateDesign = $true;   # -> parametr
+# $IsCopyRegionalSettings = $true;   # -> parametr
+# $IsCopyNavigation = $true;   # -> parametr
 
 try {
 
@@ -44,7 +75,7 @@ if ($SourceSiteUrl -and $TargetSiteUrl) {
     
     Write-Host "Connecting to Site :'$($SourcePath)'........" -ForegroundColor Yellow  
 	
-	$ClientId = "--------------will be modified-----------"
+	if (-not $ClientId) { throw "Chybi ClientId - predejte parametr -ClientId." }
     $Con1 = Connect-PnPOnline -Url $SourceSiteUrl  -Interactive -ClientId $ClientId -ReturnConnection -WarningAction Ignore
     
     Write-Host "Connection Successfull to site: '$($SourcePath)'" -ForegroundColor Green             
@@ -965,7 +996,7 @@ try{
 
 }
 
-Clear-Host
+# Clear-Host  # vypnuto, aby nezmizel vypis volajiciho skriptu
 
 if($IsDevMode){
 Set-Culture -CultureInfo en-US
