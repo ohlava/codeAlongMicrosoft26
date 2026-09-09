@@ -35,9 +35,9 @@
     Provede změny. Bez něj skript jen vypíše, co by udělal.
 
 .PARAMETER SkipTitles
-    Položky, které se nekopírují. Výchozí seznam obsahuje odkazy, které si
-    SharePoint zakládá sám (Dokumenty, Poznámkový blok, Nedávno použité) v české,
-    německé a anglické variantě.
+    Položky, které se nekopírují. Výchozí je prázdný seznam, tedy kopíruje se
+    všechno - duplicitám brání to, že položka se stejným názvem se nepřidá
+    znovu.
 
 .EXAMPLE
     # 1) Nejdřív se podívat, co by se stalo
@@ -75,12 +75,10 @@ param(
 
     [int] $MaxDepth = 10,
 
-    [string[]] $SkipTitles = @(
-        "Dokumenty", "Documents", "Dokumente",
-        "Poznámkový blok", "Notebook", "Notizbuch",
-        "Nedávno použité", "Recent", "Zuletzt verwendet",
-        "Stránky webu", "Site Pages", "Websiteseiten"
-    )
+    # Prázdné = kopíruje se všechno. Slučování už duplicitám brání tím, že
+    # položku se stejným názvem nepřidá znovu. Odkaz jako "Documents" ze vzoru
+    # míří na vlastní pohled knihovny, takže ho zahodit by byla chyba.
+    [string[]] $SkipTitles = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -361,7 +359,7 @@ foreach ($navLocation in $locations) {
 
     $targetTree = Read-Navigation $navLocation $targetConnection $MaxDepth
     $targetTitles = @($targetTree | ForEach-Object { $_.Title })
-    Write-Host "  v cíli už je: $(Measure-NavigationNodes $targetTree) položek na první úrovni: $($targetTitles -join ', ')"
+    Write-Host "  v cíli už je: $($targetTitles.Count) položek na první úrovni: $($targetTitles -join ', ')"
 
     $rows = @(Get-NavigationRows $sourceTree $sourcePath $targetPath)
     foreach ($row in $rows) { $row | Add-Member -NotePropertyName Location -NotePropertyValue $navLocation }

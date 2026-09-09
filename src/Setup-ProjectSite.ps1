@@ -10,6 +10,7 @@
       Copy-SharePointLists.ps1    seznamy ze vzorového webu
       Copy-SharePointEvents.ps1   kalendáře (Events) ze vzorového webu
       Copy-SitePages.ps1          stránky, obrázky, vzhled, regionální nastavení
+      Copy-DocumentLibraries.ps1  knihovny dokumentů včetně souborů
       Set-CsdClass.ps1            CSD Class na knihovně a jejích souborech
       Copy-SiteNavigation.ps1     navigace (volitelně)
       script.ps1                  původní klonovací skript (volitelně)
@@ -32,7 +33,7 @@
     přenese jen jejich struktura - to je běžnější případ.
 
 .PARAMETER Steps
-    Co se má dělat. Výchozí: Folders, Lists, Events, Pages, Navigation, CsdClass.
+    Co se má dělat. Výchozí: Folders, Lists, Events, Files, Pages, Navigation, CsdClass.
     TemplateClone je potřeba vyžádat výslovně.
 
     TemplateClone spustí původní script.ps1, který naklonuje vzorový web jako
@@ -81,8 +82,8 @@ param(
     [switch] $Apply,
     [switch] $WithData,
 
-    [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Pages", "Navigation", "CsdClass")]
-    [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "Navigation", "CsdClass"),
+    [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Files", "Pages", "Navigation", "CsdClass")]
+    [string[]] $Steps = @("Folders", "Lists", "Events", "Files", "Pages", "Navigation", "CsdClass"),
 
     [string] $SourceSiteUrl = "",
     [string] $ConfigPath = "",
@@ -192,7 +193,7 @@ $library = if ($settings.library) { $settings.library } else { "Dokumenty" }
 $structureFile = Resolve-RepoPath $(if ($settings.folderStructureFile) { $settings.folderStructureFile } else { "Folder_Structure.xlsx" })
 $fixedMetadata = ConvertTo-Hashtable $settings.fixedMetadata
 
-$needsSource = @("TemplateClone", "Lists", "Events", "Pages", "Navigation") | Where-Object { $Steps -contains $_ }
+$needsSource = @("TemplateClone", "Lists", "Events", "Files", "Pages", "Navigation") | Where-Object { $Steps -contains $_ }
 if ($needsSource -and -not $SourceSiteUrl) {
     throw "Kroky $($needsSource -join ', ') potřebují vzorový web. Doplňte sourceSiteUrl do konfigurace, nebo předejte -SourceSiteUrl."
 }
@@ -227,6 +228,7 @@ Assert-ScriptsPresent @(
     "Set-CsdClass.ps1",
     "Copy-SharePointLists.ps1",
     "Copy-SharePointEvents.ps1",
+    "Copy-DocumentLibraries.ps1",
     "Copy-SitePages.ps1",
     "Copy-SiteNavigation.ps1"
 )
@@ -389,6 +391,27 @@ Invoke-Step "Events" {
 }
 
 # ============================================================
+# Knihovny dokumentů se soubory
+#
+# Odkazy na stránkách míří na soubory ve vzorových knihovnách. Bez nich by
+# stránky vedly do prázdna, proto tenhle krok běží před krokem Pages.
+# ============================================================
+
+Invoke-Step "Files" {
+    $arguments = @{
+        SourceSiteUrl = $SourceSiteUrl
+        TargetSiteUrl = $TargetSiteUrl
+        ClientId      = $clientId
+        OutputFolder  = (Resolve-RepoPath $OutputFolder)
+    }
+    if ($Apply) { $arguments["Apply"] = $true }
+    if ($settings.libraries) { $arguments["Libraries"] = @($settings.libraries) }
+    if ($settings.maxFileSizeMB) { $arguments["MaxFileSizeMB"] = [int]$settings.maxFileSizeMB }
+
+    & (Join-Path $scriptRoot "Copy-DocumentLibraries.ps1") @arguments
+}
+
+# ============================================================
 # Stránky, obrázky, vzhled a regionální nastavení
 # ============================================================
 
@@ -400,6 +423,7 @@ Invoke-Step "Pages" {
         OutputFolder  = (Resolve-RepoPath $OutputFolder)
     }
     if ($Apply) { $arguments["Apply"] = $true }
+    if ($settings.themeName) { $arguments["ThemeName"] = $settings.themeName }
 
     & (Join-Path $scriptRoot "Copy-SitePages.ps1") @arguments
 }

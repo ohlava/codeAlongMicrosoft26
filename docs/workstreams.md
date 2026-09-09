@@ -13,6 +13,7 @@ nebo odkládáte práci.
 | CSD Class / spravovaná metadata | `src/Set-CsdClass.ps1` | Sergiu Nica, Ondřej Hlava | `feature/setup-project-site` | draft |
 | Původní klonovací skript | `src/script.ps1` (v2.8, parametry) | Ondřej Hlava, Sergiu Nica | `feature/setup-project-site` | přesunuto |
 | Struktura složek z Excelu | `src/New-FolderStructure.ps1` | Ondřej Hlava | — | funguje, testováno |
+| Knihovny dokumentů se soubory | `src/Copy-DocumentLibraries.ps1` | Sergiu Nica, Ondřej Hlava | `feature/setup-project-site` | draft |
 | Stránky, vzhled, regionální nastavení | `src/Copy-SitePages.ps1` | Ondřej Hlava | `feature/setup-project-site` | draft, neotestováno |
 | Kopírování navigace | `src/Copy-SiteNavigation.ps1` | Ondřej Hlava | — | draft, neotestováno |
 | Kopírování knihoven ze vzoru | `script.ps1` (`Copy-PnPDocLibs`) | Sergiu Nica | `add-library-copy-function-with-folder-structure` | rozpracováno |

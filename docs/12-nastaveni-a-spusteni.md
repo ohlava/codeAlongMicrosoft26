@@ -89,6 +89,9 @@ Vyplnit:
 | `folderStructureFile` | Excel se strukturou složek |
 | `fixedMetadata` | Metadata na každé vytvořené složce. Klíč je **interní** název sloupce |
 | `fieldTitles` | Popisek sloupce v knihovně, např. `RevIMBCS` → `CSD Class`. Mění se jen v cílové knihovně |
+| `themeName` | Název motivu pro cílový web. Prázdné = zkusí se přečíst ze vzoru |
+| `libraries` | Které knihovny kopírovat i se soubory. Prázdné = všechny kromě systémových |
+| `maxFileSizeMB` | Soubory nad tuto velikost se přeskočí |
 | `csdClassScope` | `DefaultValue`, `ExistingFiles`, nebo `Both` — viz 1.5 |
 | `legacyScript` | Nastavení pro volitelný krok `TemplateClone` |
 
@@ -170,8 +173,9 @@ Tohle je ten běžný případ. Proběhne:
 2. **CsdClass** — výchozí hodnota sloupce, aby ji dostaly nově nahrané soubory
 3. **Lists** — seznamy ze vzorového webu, bez položek
 4. **Events** — kalendáře ze vzorového webu, bez položek
-5. **Pages** — stránky, webparty, obrázky, barevné téma, hlavička, regionální nastavení
-6. **Navigation** — levá a horní navigace webu
+5. **Files** — knihovny dokumentů ze vzoru včetně souborů
+6. **Pages** — stránky, webparty, obrázky, barevné téma, hlavička, regionální nastavení
+7. **Navigation** — levá a horní navigace webu
 
 ### Kdy je potřeba -WithData
 
@@ -222,6 +226,7 @@ V takovém případě spusťte s `-WithData`.
 | `CsdClass` | ano | ano | ano |
 | `Lists` | ano | ne | ano, chybějící doplní |
 | `Events` | ano | ne | ano, chybějící doplní |
+| `Files` | ano | ano, vypíše počty a objem | ano, existující soubory přeskočí |
 | `Pages` | ano | ano, vypíše stránky | **ne, přepisuje stránky** |
 | `Navigation` | ano | ano, vypíše strom | ano |
 | `TemplateClone` | ne | ne | **ne, maže seznamy** |
@@ -284,23 +289,39 @@ Vizuál se skládá z několika nezávislých věcí a každá se přenáší ji
 
 | Co je vidět | Přenáší | Když chybí |
 |-------------|---------|------------|
-| Barvy webu | krok `Pages`, `Set-PnPWebTheme` | Vlastní téma musí být registrované v tenantu (`Add-PnPTenantTheme`), jinak ho nelze nastavit |
+| Barvy webu | krok `Pages`, `Set-PnPWebTheme` | Starší PnP neumí motiv ze vzoru přečíst — doplňte `themeName` do konfigurace |
 | Logo, popis webu | krok `Pages`, handler `WebSettings` | — |
 | Tvar hlavičky, megamenu | krok `Pages` | — |
 | Rozložení stránky, webparty | krok `Pages` | — |
 | Obrázky na stránkách | krok `Pages` | Obrázky mimo vzorový web se nepřenášejí |
 | Levá a horní navigace webu | krok `Navigation` | Hub navigace se dědí z hubu a nepřenáší se |
 | Odkazy a dlaždice plněné ze seznamu | krok `Lists` **s `-WithData`** | Bez `-WithData` zůstanou prázdné |
+| Soubory, na které stránky odkazují | krok `Files` | Bez nich odkazy nikam nevedou a nemají ikony |
 
-Nejčastější příčina "vypadá to jinak" jsou poslední dva řádky.
+### Odkazy na stránce nikam nevedou
+
+Když stránka ukazuje položky jen s názvem, bez ikon, a nejdou otevřít, chybí
+soubory. Stránka i webparty se přenesly, ale míří na soubory, které ve vzorovém
+webu jsou a v cíli ne.
+
+Řeší to krok `Files`, který je ve výchozí sadě a běží záměrně **před** krokem
+`Pages`. Kopíruje knihovny dokumentů ze vzoru včetně složek a souborů. Soubor,
+který v cíli už je, přeskočí, takže opakovaný běh je rychlý.
+
+Výchozí knihovnu `Dokumenty` vynechává — tu plní struktura z Excelu. Pokud
+chcete i její obsah ze vzoru, vypište ji do konfigurace:
+
+```json
+"libraries": ["Dokumenty"]
+```
+
+Kopíruje se přes lokální disk, takže velká knihovna trvá dlouho. Náhled bez
+`-Apply` ukáže počet souborů a objem dat dopředu.
 
 ## Co řešení nedělá
 
 - **nezakládá web** — cílový web musí existovat,
 - **neřeší oprávnění** — skupiny ani role vůbec,
-- **nepřenáší knihovny dokumentů ze vzoru včetně souborů** — struktura složek se
-  bere z Excelu; kopírování knihoven s obsahem umí `Copy-PnPDocLibs` ve
-  `script.ps1` verze 2.7 (autor Sergiu Nica, zatím na vlastní branchi),
 - **nedoplňuje metadata u souborů, které vznikly dřív** — pokud je chcete
   označit, `csdClassScope: Both`.
 

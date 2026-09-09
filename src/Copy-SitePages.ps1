@@ -27,6 +27,10 @@
 .PARAMETER Steps
     Co přenést. Výchozí je vše: Pages, Images, HomePage, Design, Regional.
 
+.PARAMETER ThemeName
+    Název motivu pro cílový web, například "Blue" nebo název firemního motivu.
+    Když se nezadá, skript zkusí motiv přečíst ze vzorového webu.
+
 .PARAMETER Apply
     Provede změny.
 
@@ -59,6 +63,10 @@ param(
     [string[]] $Steps = @("Pages", "Images", "HomePage", "Design", "Regional"),
 
     [string[]] $Pages = @(),
+
+    # Název motivu, který se má nastavit na cílovém webu. Když se nezadá,
+    # skript ho zkusí přečíst ze vzoru - ne každá verze PnP to ale umí.
+    [string] $ThemeName = "",
 
     [switch] $Apply
 )
@@ -324,20 +332,45 @@ if ($Steps -contains "Design") {
         Add-PageWarning "WebSettings nelze přenést: $($_.Exception.Message)"
     }
 
-    # Barevné téma. Tohle je ta část, která rozhoduje o barvách webu.
-    try {
-        $theme = Get-PnPWebTheme -Connection $sourceConnection -ErrorAction Stop
+    # Barevné téma. Rozhoduje o barvách webu a ve WebSettings NENÍ.
+    # Cmdlet na přečtení tématu ze zdroje se mezi verzemi PnP liší a v některých
+    # chybí úplně - proto se dá název tématu předat parametrem -ThemeName.
+    $themeName = $ThemeName
 
-        if ($theme -and $theme.Name) {
-            Set-PnPWebTheme -Theme $theme.Name -Connection $targetConnection -ErrorAction Stop
-            Write-Host "  téma: $($theme.Name)" -ForegroundColor Green
+    if (-not $themeName) {
+        $reader = @("Get-PnPWebTheme", "Get-PnPTheme") |
+            Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+
+        if ($reader) {
+            try {
+                $sourceTheme = & $reader -Connection $sourceConnection -ErrorAction Stop
+                if ($sourceTheme) {
+                    $themeName = if ($sourceTheme.Name) { $sourceTheme.Name } else { "$sourceTheme" }
+                }
+            }
+            catch {
+                Add-PageWarning "Téma vzoru nelze přečíst ($reader): $($_.Exception.Message)"
+            }
         }
         else {
-            Write-Host "  téma: vzor nemá pojmenované téma, přeskakuji" -ForegroundColor DarkGray
+            Add-PageWarning "Nainstalovaná verze PnP.PowerShell neumí přečíst téma webu. Zjistěte název tématu v cílovém webu (Nastavení -> Změnit vzhled -> Motiv) a předejte ho jako -ThemeName, nebo v konfiguraci klíčem themeName."
         }
     }
-    catch {
-        Add-PageWarning "Téma nelze přenést: $($_.Exception.Message). Vlastní téma musí být v tenantu registrované (Add-PnPTenantTheme), jinak ho na cílovém webu nastavit nelze."
+
+    if ($themeName) {
+        if (Get-Command Set-PnPWebTheme -ErrorAction SilentlyContinue) {
+            try {
+                Set-PnPWebTheme -Theme $themeName -Connection $targetConnection -ErrorAction Stop
+                Write-Host "  téma: $themeName" -ForegroundColor Green
+            }
+            catch {
+                Add-PageWarning "Téma '$themeName' nelze nastavit: $($_.Exception.Message). Vlastní téma musí být registrované v tenantu (Add-PnPTenantTheme)."
+            }
+        }
+        else {
+            Add-PageWarning "Set-PnPWebTheme v nainstalované verzi PnP.PowerShell není, téma nastavte ručně."
+        }
     }
 
     # Hlavička, megamenu a levá navigace - další věci, které jsou vidět na

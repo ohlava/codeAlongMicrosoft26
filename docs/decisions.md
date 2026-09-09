@@ -252,4 +252,47 @@ nic nemění.
 
 ---
 
+## 2026-09-09 | TECH | Názvy PnP cmdletů se ověřují za běhu, ne předpokládají
+
+Zdroj: druhý běh proti webu TESTE.
+
+`Set-PnPDefaultColumnValue` a `Get-PnPWebTheme` v nainstalované verzi
+PnP.PowerShell neexistují. Skripty teď hledají cmdlet přes
+`Get-Command -ErrorAction SilentlyContinue` a zkoušejí známé varianty názvu
+(`Set-PnPDefaultColumnValues` i jednotné číslo). Když žádná není, řeknou, co
+udělat ručně, místo aby krok spadl.
+
+Motiv webu se navíc dá zadat v konfiguraci klíčem `themeName`, protože ne každá
+verze PnP ho umí ze vzoru přečíst.
+
+---
+
+## 2026-09-09 | TECH | Krok Files kopíruje knihovny dokumentů se soubory
+
+Zdroj: běh proti webu TESTE - stránky se přenesly, ale odkazy na nich nikam
+nevedly a soubory neměly ikony.
+
+Příčina: stránky odkazují na soubory ve vzorových knihovnách. Bez nich zůstanou
+mrtvé odkazy.
+
+`src/Copy-DocumentLibraries.ps1` vychází z `Copy-PnPDocLibs` ve `script.ps1`
+verze 2.7 (autor Sergiu Nica). Navíc má náhled, přeskakuje soubory, které v cíli
+už jsou, a má strop na velikost souboru.
+
+Je ve výchozí sadě a běží **před** krokem `Pages`. Výchozí knihovnu `Dokumenty`
+vynechává, protože tu plní struktura z Excelu; dá se vyžádat klíčem `libraries`.
+
+---
+
+## 2026-09-09 | TECH | Navigace se kopíruje celá, seznam vynechávaných je prázdný
+
+Zdroj: běh proti webu TESTE - položka "Documents" ze vzoru se přeskočila.
+
+Vynechávala se jako "výchozí odkaz, který si SharePoint zakládá sám", jenže ve
+vzoru míří na vlastní pohled knihovny (`Forms/Project view.aspx`) a je to
+záměrný odkaz. Duplicitám brání už samo slučování podle názvu, takže seznam
+`SkipTitles` je teď prázdný a kopíruje se všechno.
+
+---
+
 <!-- Nové záznamy připisujte sem, nejnovější dolů. -->

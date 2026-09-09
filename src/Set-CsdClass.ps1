@@ -264,13 +264,25 @@ if ($Scope -ne "ExistingFiles") {
     # U spravovaných metadat má výchozí hodnota tvar "-1;#Nazev|GUID".
     $defaultValue = if ($isTaxonomy) { "-1;#$($term.Name)|$($term.Id)" } else { $Value }
 
-    try {
-        Set-PnPDefaultColumnValue -List $list.Id -Field $target.InternalName -Value $defaultValue -ErrorAction Stop
-        Write-Host "  nastaveno: $defaultValue" -ForegroundColor Green
-        Write-Host "  Platí pro nově nahrávané soubory, existující nemění." -ForegroundColor DarkGray
+    # Cmdlet se mezi verzemi PnP jmenuje jednou v jednotném, jednou v množném
+    # čísle. Vybereme ten, který v nainstalované verzi opravdu je.
+    $cmdlet = @("Set-PnPDefaultColumnValues", "Set-PnPDefaultColumnValue") |
+        Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+        Select-Object -First 1
+
+    if (-not $cmdlet) {
+        Write-Host "  přeskakuji: nainstalovaná verze PnP.PowerShell nezná Set-PnPDefaultColumnValues." -ForegroundColor Yellow
+        Write-Host "  Nastavte výchozí hodnotu ručně: knihovna -> Nastavení -> Výchozí hodnoty sloupců." -ForegroundColor DarkGray
     }
-    catch {
-        Write-Host "  nelze nastavit: $($_.Exception.Message)" -ForegroundColor Red
+    else {
+        try {
+            & $cmdlet -List $list.Id -Field $target.InternalName -Value $defaultValue -ErrorAction Stop
+            Write-Host "  nastaveno: $defaultValue" -ForegroundColor Green
+            Write-Host "  Platí pro nově nahrávané soubory, existující nemění." -ForegroundColor DarkGray
+        }
+        catch {
+            Write-Host "  nelze nastavit ($cmdlet): $($_.Exception.Message)" -ForegroundColor Red
+        }
     }
 }
 
