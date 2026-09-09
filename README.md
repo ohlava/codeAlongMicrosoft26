@@ -322,3 +322,9 @@ python copy_site.py
 ✅ View Formatting
 
 ✅ Column Formatting
+
+# V sharepointu
+
+Je potřeba nastavit v sharepointu ručně motiv
+
+⚙️ Nastavení → Změnit vzhled → Motiv → Škoda light
