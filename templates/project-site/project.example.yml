@@ -1,0 +1,116 @@
+# STRAW MAN - podklad pro diskusi s byznysem, ne finální schéma.
+# Cílem je, aby si to zadavatel otevřel a řekl "tady to je špatně".
+# Hodnoty jsou vymyšlené a je potřeba je nahradit realitou EOZ.
+
+apiVersion: v1
+kind: ProjectSite
+
+# --- Identita projektu -------------------------------------------------------
+project:
+  id: EOZ-2026-014            # unikátní kód projektu, zdroj pravdy?
+  name: "Nový modul dveří"
+  owner: jan.novak@example.com
+  department: EOZ
+  type: development           # viz types/ - liší se struktura podle typu?
+  phase: realization          # initiation | planning | realization | closing | archived
+
+# --- Web ---------------------------------------------------------------------
+site:
+  urlPattern: "/sites/proj-{project.id}"
+  template: CommunicationSite   # nebo TeamSite (vznikne i M365 group a Teams)
+  language: cs-CZ
+  hubSite: "/sites/projekty"     # existuje?
+  sensitivityLabel: internal     # je v tenantu povinné?
+
+# --- Knihovny dokumentů ------------------------------------------------------
+libraries:
+  - name: "Zadání a smlouvy"
+    folders: ["Smlouvy", "Objednávky"]
+    requiredMetadata: [documentType, phase, confidentiality]
+    restrictAccessTo: [projectLead, controlling]   # ne všichni?
+
+  - name: "Technická dokumentace"
+    folders: ["Výkresy", "Specifikace", "Testy"]
+    requiredMetadata: [documentType, phase, revision]
+    versioning:
+      major: true
+      minor: true
+      keepVersions: 50
+
+  - name: "Porady a zápisy"
+    folders: []
+    requiredMetadata: [meetingDate]
+
+  - name: "Reporting"
+    availableFromPhase: realization    # knihovna přibyde až ve fázi realizace
+
+# --- Metadata (site columns) -------------------------------------------------
+# Produkčně patří do Content Type Gallery, ne na jednotlivé weby.
+metadata:
+  - name: documentType
+    displayName: "Typ dokumentu"
+    type: choice
+    required: true
+    choices: ["Smlouva", "Výkres", "Specifikace", "Zápis", "Report", "Ostatní"]
+
+  - name: phase
+    displayName: "Fáze projektu"
+    type: choice
+    choices: ["Zadání", "Plánování", "Realizace", "Uzavření"]
+
+  - name: confidentiality
+    displayName: "Důvěrnost"
+    type: choice
+    choices: ["Veřejné", "Interní", "Důvěrné"]
+
+  - name: revision
+    displayName: "Revize"
+    type: text
+
+# --- Oprávnění ---------------------------------------------------------------
+# Skupiny by měly existovat v Entra ID, ne se zakládat lokálně na webu.
+permissions:
+  - role: projectLead
+    principal: "entra-group:PROJ-{project.id}-Leads"
+    level: FullControl
+  - role: member
+    principal: "entra-group:PROJ-{project.id}-Members"
+    level: Contribute
+  - role: reader
+    principal: "entra-group:EOZ-All"
+    level: Read
+  - role: external
+    principal: "entra-group:PROJ-{project.id}-External"
+    level: Read
+    limitedToLibraries: ["Technická dokumentace"]
+
+# --- Přechody mezi fázemi ----------------------------------------------------
+lifecycle:
+  phases:
+    - name: initiation
+      onEnter:
+        - notify: [projectLead]
+    - name: planning
+      onEnter:
+        - createLibrary: "Plánování"
+    - name: realization
+      onEnter:
+        - createLibrary: "Reporting"
+        - setLibraryReadOnly: "Zadání a smlouvy"
+        - notify: [projectLead, controlling]
+    - name: closing
+      onEnter:
+        - requireApprovalFrom: [projectLead]
+        - setLibraryReadOnly: "Technická dokumentace"
+    - name: archived
+      onEnter:
+        - setSiteReadOnly: true
+        - removeFromHubNavigation: true
+        - applyRetentionLabel: "Projekt-10let"
+        - notify: [projectLead]
+
+# --- Archivace ---------------------------------------------------------------
+archive:
+  retentionYears: 10          # kolik skutečně? podle typu dokumentu?
+  keepSearchable: true        # má být archiv dohledatelný?
+  deleteAfterRetention: false # smaže se automaticky, nebo to někdo potvrdí?

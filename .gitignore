@@ -145,3 +145,17 @@ data/
 Thumbs.db
 .idea/
 .vscode/*
+
+# Vlastni nastaveni s ClientId a adresami tenantu - kazdy si drzi svoje.
+# Sablona je v config/settings.example.json.
+config/settings.json
+
+# Vystupy skriptu - plany, inventare, exporty. Mohou obsahovat firemni data.
+export/
+
+# Pracovni soubory kopirovaciho skriptu.
+FileTemp/
+export.txt
+xml.txt
+settings.txt
+*.pnp

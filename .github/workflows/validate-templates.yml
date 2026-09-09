@@ -1,0 +1,31 @@
+# Skeleton. Validuje definice projektů proti JSON Schematu při každém PR.
+# Nevyžaduje žádný přístup k tenantu, takže může fungovat od prvního dne.
+name: Validate templates
+
+on:
+  pull_request:
+    paths:
+      - "templates/**"
+      - "schema/**"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validator
+        run: pip install check-jsonschema
+
+      # TODO: až bude schema/project-site.schema.json, odkomentovat.
+      # - name: Validate project definitions
+      #   run: |
+      #     check-jsonschema \
+      #       --schemafile schema/project-site.schema.json \
+      #       templates/project-site/*.yml

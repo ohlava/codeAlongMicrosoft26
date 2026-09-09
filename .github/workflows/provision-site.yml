@@ -1,0 +1,42 @@
+# Skeleton. Ruční spuštění provisioningu jednoho projektového webu.
+# Výchozí režim je dry-run - ostrá aplikace vyžaduje explicitní volbu.
+#
+# Autentizace není nastavená. Preferovaná cesta je workload identity federation
+# (OIDC) proti Entra ID, aby v repozitáři nebyl žádný secret.
+# Viz docs/02-technologie.md, vrstva 4.
+name: Provision project site
+
+on:
+  workflow_dispatch:
+    inputs:
+      definition:
+        description: "Cesta k definici projektu"
+        required: true
+        default: "templates/project-site/project.example.yml"
+      apply:
+        description: "Provést změny (jinak jen dry-run)"
+        type: boolean
+        default: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PnP PowerShell
+        shell: pwsh
+        run: Install-Module PnP.PowerShell -Force -Scope CurrentUser
+
+      # TODO: přihlášení k tenantu - doplnit až budou známé přístupy.
+      # - name: Connect
+      #   shell: pwsh
+      #   run: Connect-PnPOnline -Url $env:SPO_URL -ClientId $env:CLIENT_ID ...
+
+      # TODO: až bude src/Provision-ProjectSite.ps1, odkomentovat.
+      # - name: Provision
+      #   shell: pwsh
+      #   run: |
+      #     ./src/Provision-ProjectSite.ps1 `
+      #       -Definition '${{ inputs.definition }}' `
+      #       -Apply:$${{ inputs.apply }}

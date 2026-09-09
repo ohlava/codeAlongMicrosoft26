@@ -1,0 +1,16 @@
+{
+  "_comment": "Zkopirujte tento soubor jako config/settings.json a doplnte hodnoty. settings.json je v .gitignore, do repozitare se nedostane.",
+
+  "clientId": "00000000-0000-0000-0000-000000000000",
+
+  "sourceSiteUrl": "https://<tenant>.sharepoint.com/sites/<vzorovy-web>",
+
+  "library": "Dokumenty",
+  "folderStructureFile": "Folder_Structure.xlsx",
+
+  "fixedMetadata": {
+    "CSD_x0020_Class": "5.3 Car Series and Concept Docs"
+  },
+
+  "setDefaultColumnValues": true
+}
