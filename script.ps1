@@ -52,6 +52,10 @@ $IsCopyTemplateDesign = $true;
 $IsCopyRegionalSettings = $true;
 $IsCopyNavigation = $true;
 
+# Demo verze šablony pro evidenci v property bag webu.
+# V reálném nasazení je vhodné nastavovat přes interní číslování šablon.
+$TemplateVersion = "1.3.0-demo"
+
 try {
 
 if ($SourceSiteUrl -and $TargetSiteUrl) {
@@ -872,6 +876,10 @@ if($IsCopyTemplateDesign -eq $true){
 
     $set = Invoke-PnPSiteTemplate -Path $filePathToTask -Connection $global:Con2
 
+    # Po aplikaci šablony uložíme její verzi do property bag webu.
+    # Ukládáme demo verzi, aby bylo možné z webu snadno ověřit, která šablona byla nasazena.
+    Set-TemplateVersionOnWeb -WebUrl $TargetSiteUrl -Version $TemplateVersion
+
     #set HeaderLayout
     $Web = Get-PnPWeb -Connection $Con1
 
@@ -885,6 +893,9 @@ if($IsCopyTemplateDesign -eq $true){
 if($IsCopyRegionalSettings -eq $true){
     Copy-Regionalsettings
 }
+
+# Vytištění aktuální verze šablony po aplikaci.
+Get-TemplateVersionFromWeb -WebUrl $TargetSiteUrl
 
 }
 
@@ -970,6 +981,57 @@ if((($SourceNav.Title -ne "Notebook") -and ($SourceNav.Title -ne "Notizbuch")) -
 
     return $AddedId
 
+}
+
+Function Set-TemplateVersionOnWeb {
+    param(
+        [string]$WebUrl,
+        [string]$Version
+    )
+
+    # Zápis verze šablony do property bag webu pod klíčem "TemplateVersion".
+    # Tím lze na webu jednoduše dohledat, jaká verze šablony byla v daném okamžiku nasazena.
+    try {
+        $TargetWeb = Get-PnPWeb -Connection $global:Con2
+        $CurrentValue = Get-PnPPropertyBagValue -Key "TemplateVersion" -Web $TargetWeb -Connection $global:Con2
+
+        if ($CurrentValue) {
+            Write-Host "Předchozí verze šablony na webu: $CurrentValue" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "Na webu zatím není založená žádná verze šablony." -ForegroundColor DarkGray
+        }
+
+        Set-PnPPropertyBagValue -Key "TemplateVersion" -Value $Version -Web $TargetWeb -Connection $global:Con2
+        Write-Host "Verze šablony uložena do property bag webu: $Version" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Chyba při zápisu verze šablony do property bag webu: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Function Get-TemplateVersionFromWeb {
+    param(
+        [string]$WebUrl
+    )
+
+    # Funkce pro rychlé zjištění, jaká verze šablony je aktuálně nasazená na daném webu.
+    try {
+        $TargetWeb = Get-PnPWeb -Connection $global:Con2
+        $CurrentVersion = Get-PnPPropertyBagValue -Key "TemplateVersion" -Web $TargetWeb -Connection $global:Con2
+
+        if ($CurrentVersion) {
+            Write-Host "Nasalena verze šablony na webu: $CurrentVersion" -ForegroundColor Green
+            return $CurrentVersion
+        }
+
+        Write-Host "Na webu není v property bag nastavena žádná verze šablony." -ForegroundColor Yellow
+        return $null
+    }
+    catch {
+        Write-Host "Chyba při čtení verze šablony z property bag webu: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
 }
 
 Function Copy-Regionalsettings {
