@@ -11,6 +11,7 @@
       Copy-SharePointEvents.ps1   kalendáře (Events) ze vzorového webu
       Copy-SitePages.ps1          stránky, obrázky, vzhled, regionální nastavení
       Copy-SiteNavigation.ps1     navigace (volitelně)
+      script.ps1                  původní klonovací skript (volitelně)
 
     Nastavení, které se skoro nemění - ClientId, vzorový web, knihovna, hodnota
     CSD Class - se drží v config/settings.json, takže se nepíše do příkazu.
@@ -29,7 +30,11 @@
 
 .PARAMETER Steps
     Co se má dělat. Výchozí: Folders, Lists, Events, Pages, DefaultValues.
-    Navigation je potřeba vyžádat výslovně.
+    Navigation a TemplateClone je potřeba vyžádat výslovně.
+
+    TemplateClone spustí původní script.ps1, který naklonuje vzorový web jako
+    celek. MAŽE v cíli seznamy, než je vytvoří znovu - použitelné jen na
+    čerstvě založený web. Podrobněji v docs/11-klonovani-vzoru.md.
 
 .PARAMETER SourceSiteUrl
     Vzorový web. Normálně se bere z konfigurace, tímto se dá jednorázově změnit.
@@ -48,6 +53,10 @@
 .EXAMPLE
     # Včetně obsahu seznamů a kalendářů
     ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -WithData -Apply
+
+.EXAMPLE
+    # Naklonovat vzorový web jako celek a pak doplnit složky z Excelu
+    ./src/Setup-ProjectSite.ps1 -TargetSiteUrl "https://contoso.sharepoint.com/sites/Proj42" -Steps TemplateClone,Folders,DefaultValues -Apply
 
 .EXAMPLE
     # Jen stránky a vzhled, nic jiného
@@ -69,7 +78,7 @@ param(
     [switch] $Apply,
     [switch] $WithData,
 
-    [ValidateSet("Folders", "Lists", "Events", "Pages", "Navigation", "DefaultValues")]
+    [ValidateSet("TemplateClone", "Folders", "Lists", "Events", "Pages", "Navigation", "DefaultValues")]
     [string[]] $Steps = @("Folders", "Lists", "Events", "Pages", "DefaultValues"),
 
     [string] $SourceSiteUrl = "",
@@ -180,7 +189,7 @@ $library = if ($settings.library) { $settings.library } else { "Dokumenty" }
 $structureFile = Resolve-RepoPath $(if ($settings.folderStructureFile) { $settings.folderStructureFile } else { "Folder_Structure.xlsx" })
 $fixedMetadata = ConvertTo-Hashtable $settings.fixedMetadata
 
-$needsSource = @("Lists", "Events", "Pages", "Navigation") | Where-Object { $Steps -contains $_ }
+$needsSource = @("TemplateClone", "Lists", "Events", "Pages", "Navigation") | Where-Object { $Steps -contains $_ }
 if ($needsSource -and -not $SourceSiteUrl) {
     throw "Kroky $($needsSource -join ', ') potřebují vzorový web. Doplňte sourceSiteUrl do konfigurace, nebo předejte -SourceSiteUrl."
 }
@@ -217,6 +226,112 @@ Assert-ScriptsPresent @(
     "Copy-SitePages.ps1",
     "Copy-SiteNavigation.ps1"
 )
+
+# ============================================================
+# Klonování vzorového webu původním script.ps1
+#
+# script.ps1 nemá parametry - konfigurace je napsaná v jeho hlavičce. Aby se
+# nemusel upravovat (je společný a používá ho i byznys ručně), vygeneruje se
+# jeho kopie s doplněnými hodnotami a spustí se ta. Originál zůstane nedotčený.
+# ============================================================
+
+# Vrátí hodnotu ve tvaru, který PowerShell zapíše do souboru jako $true/$false.
+function Get-FlagLiteral($Value, $Default) {
+    $effective = if ($null -eq $Value) { $Default } else { [bool]$Value }
+    if ($effective) { return '$true' } else { return '$false' }
+}
+
+# Jeden řádek konfigurace v hlavičce script.ps1. Vrací nahrazený řádek, nebo
+# původní, pokud se ho nic netýká. Záměrně bez switch/continue - jejich chování
+# uvnitř smyčky se v PowerShellu snadno vyloží špatně.
+function Convert-LegacyConfigLine($Line, $Config) {
+    if ($Line -match '^\s*\$SiteDomain\s*=')            { return "`$SiteDomain = `"$($Config.Domain)`"" }
+    if ($Line -match '^\s*\$SourcePath\s*=')            { return "`$SourcePath = `"$($Config.SourceRelative)`"" }
+    if ($Line -match '^\s*\$TargetPath\s*=')            { return "`$TargetPath = `"$($Config.TargetRelative)`"" }
+    if ($Line -match '^\s*\$SetOfflineAvailable\s*=')   { return "`$SetOfflineAvailable = `"$($Config.Offline)`"" }
+    if ($Line -match '^\s*\$CopyCount\s*=')             { return "`$CopyCount = $($Config.CopyCount)" }
+    if ($Line -match '^\s*\$ClientId\s*=')              { return "`t`$ClientId = `"$($Config.ClientId)`"" }
+    if ($Line -match '^\s*\$IsCopyPages\s*=')           { return "`$IsCopyPages = $($Config.Pages);" }
+    if ($Line -match '^\s*\$IsCopyTemplateDesign\s*=')  { return "`$IsCopyTemplateDesign = $($Config.Design);" }
+    if ($Line -match '^\s*\$IsCopyRegionalSettings\s*=') { return "`$IsCopyRegionalSettings = $($Config.Regional);" }
+    if ($Line -match '^\s*\$IsCopyNavigation\s*=')      { return "`$IsCopyNavigation = $($Config.Navigation);" }
+
+    # Clear-Host by smazal výpis předchozích kroků z obrazovky.
+    if ($Line -match '^\s*Clear-Host\s*$') {
+        return "# Clear-Host  # vypnuto, aby nezmizel výpis Setup-ProjectSite"
+    }
+
+    # Řádky 2, 5 a 6 originálu nejsou zakomentované - PowerShell je zkouší
+    # spustit jako příkazy a vypíše chybu. V originálu to zakryje Clear-Host.
+    if ($Line -match '^(Bitte beim |add Banner-copy |Config\s*$)') {
+        return "# $Line"
+    }
+
+    return $Line
+}
+
+function New-PatchedLegacyScript($ScriptPath, $OutPath, $Config) {
+    $patched = foreach ($line in (Get-Content -Path $ScriptPath -Encoding UTF8)) {
+        Convert-LegacyConfigLine $line $Config
+    }
+
+    $patched | Set-Content -Path $OutPath -Encoding UTF8
+}
+
+Invoke-Step "TemplateClone" {
+    $legacyPath = Resolve-RepoPath "script.ps1"
+    if (-not (Test-Path $legacyPath)) {
+        throw "script.ps1 v korenu repozitare není."
+    }
+
+    $options = $settings.legacyScript
+    $domain = ([uri]$TargetSiteUrl).GetLeftPart([System.UriPartial]::Authority)
+    $sourceDomain = ([uri]$SourceSiteUrl).GetLeftPart([System.UriPartial]::Authority)
+
+    if ($sourceDomain -ne $domain) {
+        throw "script.ps1 umí kopírovat jen v rámci jednoho tenantu, ale vzor je na $sourceDomain a cíl na $domain."
+    }
+
+    $config = [pscustomobject]@{
+        Domain         = $domain
+        SourceRelative = ([uri]$SourceSiteUrl).AbsolutePath.TrimEnd("/")
+        TargetRelative = ([uri]$TargetSiteUrl).AbsolutePath.TrimEnd("/")
+        ClientId       = $clientId
+        # CopyCount = 1 znamená, že se nezpracuje žádný seznam - podmínka
+        # v script.ps1 je "$counter -lt $CopyCount" a counter začíná na 1.
+        # Stránky, navigace a vzhled se přenesou i tak.
+        CopyCount      = if ($options.copyLists -eq $false) { 1 } else { 1000 }
+        Offline        = if ($options.setOfflineAvailable -eq $true) { "ja" } else { "nein" }
+        Pages          = Get-FlagLiteral $options.copyPages $true
+        Design         = Get-FlagLiteral $options.copyDesign $true
+        Regional       = Get-FlagLiteral $options.copyRegional $true
+        Navigation     = Get-FlagLiteral $options.copyNavigation $true
+    }
+
+    # Generovaná kopie obsahuje ClientId a adresy tenantu, proto jde do export/,
+    # který je v .gitignore.
+    $generated = Join-Path (Resolve-RepoPath $OutputFolder) "script.generated.ps1"
+
+    New-PatchedLegacyScript $legacyPath $generated $config
+
+    Write-Host "  vygenerováno: $generated"
+    Write-Host "  doplněné hodnoty:"
+    Get-Content -Path $generated -Encoding UTF8 |
+        Select-String -Pattern '^\$(SiteDomain|SourcePath|TargetPath|CopyCount|SetOfflineAvailable|IsCopy)' |
+        ForEach-Object { Write-Host "    $($_.Line)" -ForegroundColor DarkGray }
+
+    if (-not $Apply) {
+        Write-Host ""
+        Write-Host "  [náhled] spustil bych tuto kopii. Režim náhledu tento skript nemá." -ForegroundColor Yellow
+        Write-Host "  POZOR: script.ps1 v cíli MAŽE seznamy, než je vytvoří znovu." -ForegroundColor Red
+        Write-Host "  Používejte ho jen na čerstvě založený web." -ForegroundColor Red
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  Spouštím klonování. Maže a znovu vytváří seznamy v cíli." -ForegroundColor Yellow
+    & $generated
+}
 
 # ============================================================
 # Složky z Excelu

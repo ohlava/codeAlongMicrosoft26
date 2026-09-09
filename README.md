@@ -29,7 +29,8 @@ v [docs/09-jeden-skript.md](docs/09-jeden-skript.md).
 | [docs/06-jak-spustit-export.md](docs/06-jak-spustit-export.md) | Postup spuštění exportu krok za krokem, i pro netechnického uživatele |
 | [docs/08-kopirovani-navigace.md](docs/08-kopirovani-navigace.md) | Přenesení navigace ze vzorového webu na jiný |
 | [docs/09-jeden-skript.md](docs/09-jeden-skript.md) | **Hlavní postup pro byznys** — jeden vstupní bod, konfigurace, flagy |
-| [docs/10-stranky-a-vzhled.md](docs/10-stranky-a-vzhled.md) | Přenesení stránek, webpartů, obrázků a vzhledu ze vzoru |\n| [docs/decisions.md](docs/decisions.md) | Log rozhodnutí — zdroj pravdy |
+| [docs/10-stranky-a-vzhled.md](docs/10-stranky-a-vzhled.md) | Přenesení stránek, webpartů, obrázků a vzhledu ze vzoru |
+| [docs/11-klonovani-vzoru.md](docs/11-klonovani-vzoru.md) | Krok TemplateClone — spuštění původního script.ps1 |\n| [docs/decisions.md](docs/decisions.md) | Log rozhodnutí — zdroj pravdy |
 | [docs/workstreams.md](docs/workstreams.md) | Kdo na čem pracuje |
 | [CLAUDE.md](CLAUDE.md) | Pravidla pro práci s AI agenty v tomto repozitáři |
 

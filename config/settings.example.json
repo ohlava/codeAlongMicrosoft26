@@ -12,5 +12,15 @@
     "CSD_x0020_Class": "5.3 Car Series and Concept Docs"
   },
 
-  "setDefaultColumnValues": true
+  "setDefaultColumnValues": true,
+
+  "_legacyScriptComment": "Nastaveni pro krok TemplateClone, ktery spousti puvodni script.ps1. Pouziva se jen kdyz je TemplateClone ve -Steps.",
+  "legacyScript": {
+    "copyLists": false,
+    "copyPages": true,
+    "copyDesign": true,
+    "copyRegional": true,
+    "copyNavigation": true,
+    "setOfflineAvailable": false
+  }
 }

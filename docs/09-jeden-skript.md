@@ -72,7 +72,8 @@ Tohle je ten běžný případ. Udělá:
 ... -TargetSiteUrl "..." -Steps Lists,Events -Apply
 ```
 
-Možnosti: `Folders`, `Lists`, `Events`, `Pages`, `DefaultValues`, `Navigation`.
+Možnosti: `TemplateClone`, `Folders`, `Lists`, `Events`, `Pages`,
+`DefaultValues`, `Navigation`.
 Výchozí je `Folders, Lists, Events, Pages, DefaultValues` — `Navigation` je
 potřeba vyžádat výslovně.
 
@@ -124,6 +125,7 @@ managementu** — viz [decisions.md](decisions.md) a
 | Lists | [Copy-SharePointLists.ps1](../src/Copy-SharePointLists.ps1) | **ne**, jen řekne, že by se spustil |
 | Events | [Copy-SharePointEvents.ps1](../src/Copy-SharePointEvents.ps1) | **ne**, jen řekne, že by se spustil |
 | Pages | [Copy-SitePages.ps1](../src/Copy-SitePages.ps1) | ano, vypíše stránky |
+| TemplateClone | [script.ps1](../script.ps1) | **ne**, jen vygeneruje kopii s doplněnou konfigurací |
 | Navigation | [Copy-SiteNavigation.ps1](../src/Copy-SiteNavigation.ps1) | ano, vypíše strom |
 
 `Copy-SharePointLists.ps1` a `Copy-SharePointEvents.ps1` (autor Sergiu Nica)
@@ -155,6 +157,10 @@ procesu PowerShellu, takže se přihlašovací okno normálně objeví jen u prv
 ## Co skript nedělá
 
 **Nezakládá web.** Cílový web musí existovat. Zakládání je zatím ruční krok.
+
+**Neklonuje vzorový web jako celek** — pokud to chcete, je na to krok
+`TemplateClone`, který spustí původní `script.ps1`. Není ve výchozí sadě, protože
+maže cílové seznamy. Viz [11-klonovani-vzoru.md](11-klonovani-vzoru.md).
 
 **Nepřenáší knihovny dokumentů ze vzorového webu.** Struktura složek se bere
 z Excelu. Kopírování knihoven včetně souborů řeší `Copy-PnPDocLibs` ve
